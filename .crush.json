@@ -1,0 +1,16 @@
+{
+  "providers": {
+    "litellm-local": {
+      "type": "openai-compat",
+      "base_url": "http://192.168.1.38:4000/v1",
+      "api_key": "perindolo2026*",
+      "models": [
+        {
+          "id": "qwen3-coder-30b",
+          "name": "qwen3-coder-30b",
+          "context_window": 16000
+        }
+      ]
+    }
+  }
+}

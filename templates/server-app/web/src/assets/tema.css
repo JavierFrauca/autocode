@@ -1,0 +1,74 @@
+/* Sistema de diseño — fuente única de color/tipografía/espaciado. Ver library/ui/tema-tokens.md.
+   Paleta WEB (claro, acento índigo) — alineada con la maqueta web. Modo oscuro opcional con
+   <html data-theme="dark">. */
+:root {
+  --bg: #f5f7fb;          --surface: #ffffff;     --surface-2: #f1f5f9;
+  --border: #e7ecf3;      --text: #0f172a;        --text-muted: #64748b;
+  --accent: #4f46e5;      --accent-contrast: #ffffff;
+  --danger: #dc2626;      --ok: #16a34a;          --warn: #d97706;
+  --radius: 12px;         --radius-sm: 8px;       --space: 8px;
+  --shadow: 0 8px 24px rgba(16,24,40,.06);
+  --sidebar-w: 240px;     --sidebar-w-min: 64px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+[data-theme="dark"] {
+  --bg: #0f172a;  --surface: #1e293b;  --surface-2: #243449;
+  --border: #334155;  --text: #e2e8f0;  --text-muted: #94a3b8;
+  --shadow: 0 8px 24px rgba(0,0,0,.35);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #app { height: 100%; }
+body { margin: 0; font-family: var(--font); background: var(--bg); color: var(--text); }
+a { color: var(--accent); text-decoration: none; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+
+/* Tarjeta */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: calc(var(--space)*2.5); box-shadow: var(--shadow); }
+
+/* Botón */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font: inherit;
+  font-weight: 600; border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+  padding: 10px 16px; border-radius: var(--radius-sm); cursor: pointer; }
+.btn:hover { border-color: var(--accent); }
+.btn--primary { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
+.btn--primary:hover { filter: brightness(1.07); }
+.btn--danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+.btn--block { width: 100%; }
+
+/* Campo de formulario */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > label { font-size: 13px; color: var(--text-muted); font-weight: 600; }
+.input, .select, .textarea { font: inherit; color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; outline: none; }
+.input:focus, .select:focus, .textarea:focus {
+  border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+
+/* Píldora / etiqueta de estado */
+.pill { font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 999px;
+  background: var(--surface-2); color: var(--text-muted); }
+.muted { color: var(--text-muted); }
+.error { color: var(--danger); font-size: 14px; }
+
+/* ── Impresión (listados y fichas) — ver library/ui/reporting.md ──────────────────────────────
+   Oculta la cáscara (menú/cabecera/botones) y fuerza papel A4 blanco/negro. Utilidades:
+   .no-print (se oculta al imprimir), .solo-print (solo aparece al imprimir). */
+.solo-print { display: none; }
+@media print {
+  :root { color-scheme: light; }
+  .sidebar, .shell__topbar, .no-print { display: none !important; }
+  .shell, .shell__main, .shell__contenido {
+    display: block !important; height: auto !important; min-width: 0 !important;
+    overflow: visible !important; padding: 0 !important; margin: 0 !important;
+  }
+  body { background: #fff !important; color: #000 !important; }
+  .card { box-shadow: none !important; border: 1px solid #999 !important; }
+  a { color: #000 !important; text-decoration: none !important; }
+  .solo-print { display: block !important; }
+  table { width: 100% !important; border-collapse: collapse !important; }
+  thead { display: table-header-group; }          /* repite la cabecera en cada página */
+  tr, img, .report-bloque, .ficha-seccion { break-inside: avoid; }  /* no partir filas/secciones */
+  @page { size: A4; margin: 16mm; }
+}

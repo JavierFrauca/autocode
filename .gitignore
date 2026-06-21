@@ -1,0 +1,59 @@
+# ─── Dependencias ───────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+
+# Lockfile obsoleto: AutoCode usa npm, no pnpm (engaña y rompe node_modules)
+pnpm-lock.yaml
+
+# ─── Salidas de compilación / build ─────────────────────────
+out/
+dist/
+build/
+.output/
+.vite/
+.cache/
+.turbo/
+*.tsbuildinfo
+
+# ─── Empaquetado / instaladores ─────────────────────────────
+release/
+electron-builder.yml
+
+# ─── Binarios y recursos descargados bajo demanda ───────────
+.autocode-models/ # modelos de embeddings descargados
+vendor/git/        # git portátil; se descarga a userData en runtime, no va al repo
+
+# ─── Datos / artefactos generados en tiempo de ejecución ────
+snapshots/            # snapshots de proyectos generados
+.tmp-api/             # carpeta temporal de API
+.qdrant-initialized   # marcador de inicialización
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ─── Entorno / secretos ─────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ─── Logs ───────────────────────────────────────────────────
+*.log
+npm-debug.log*
+logs/
+
+# ─── Tests / cobertura ──────────────────────────────────────
+coverage/
+.vitest/
+
+# ─── Sistema operativo / editores ───────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
