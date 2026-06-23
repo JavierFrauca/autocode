@@ -1,200 +1,228 @@
-# Autenticación con MFA — TOTP (Google Authenticator / Authy)
+# MFA por TOTP (Google Authenticator / Authy) — sobre el login del andamiaje
 
-**Categoría:** auth | **Cuándo usar:** Apps con datos sensibles (documentos privados, finanzas, salud). Se añade encima de `auth-local-completo.md` — no sustituye al login con contraseña, lo refuerza.
+**Categoría:** auth | **Cuándo usar:** apps con datos sensibles (documentos privados, finanzas, salud). Se
+añade ENCIMA del login con contraseña del andamiaje (`templates/server-app`) — no lo sustituye, lo refuerza.
 
 **Trade-offs:**
-- ✅ Seguridad muy alta: incluso con la contraseña robada, el atacante necesita el dispositivo físico
-- ✅ Sin coste: compatible con cualquier app TOTP gratuita (Google Authenticator, Authy, 1Password)
-- ❌ Fricción adicional en el login (código de 6 dígitos cada vez)
-- ❌ Si el usuario pierde el dispositivo, necesitas un flujo de recuperación (códigos de backup)
+- ✅ Seguridad muy alta: aun con la contraseña robada, hace falta el dispositivo físico. Sin coste (cualquier
+  app TOTP gratuita).
+- ❌ Fricción extra (código de 6 dígitos). Si se pierde el dispositivo, hacen falta códigos de respaldo.
 
-## Columnas adicionales en la tabla usuarios
+> Convención CLAVE: coherente con el andamiaje — **cero dependencias** (TOTP con `node:crypto`, ni `otplib` ni
+> `qrcode` ni `jsonwebtoken`), acceso por `repos.usuarios` (Repository), y al superar el 2º factor se emite **la
+> MISMA cookie de sesión** (`firmarSesion` + `COOKIE_SESION`). La columna `mfa_secret` ya existe en `usuarios`.
 
-```typescript
-// Añadir a db/schema.ts
-export const usuarios = pgTable("usuarios", {
-  // ... columnas existentes de auth-local-completo.md ...
-  mfaSecret:   text("mfa_secret"),         // null = MFA no activado
-  mfaActivado: boolean("mfa_activado").notNull().default(false),
-  mfaBackup:   text("mfa_backup"),         // JSON array de códigos de backup hasheados
-});
+## Esquema — una columna más para los códigos de respaldo
+
+En `initDb` (`src/db.ts`), la tabla `usuarios` ya trae `mfa_secret`; añade `mfa_backup`:
+
+```sql
+-- en CREATE TABLE usuarios (...): mfa_secret ya está; añade:
+mfa_backup TEXT          -- JSON de códigos de respaldo hasheados (null si no hay)
 ```
 
-## Flujo de activación del MFA
+Regla: **`mfa_secret` no null = MFA activo**. Durante el alta el secreto NO se guarda hasta confirmar el
+primer código (así no queda un MFA "a medias" que bloquee al usuario).
 
-```
-1. Usuario hace login normal → recibe access token
-2. GET /api/auth/mfa/setup → servidor genera secreto → devuelve QR code URI
-3. Usuario escanea QR con su app TOTP
-4. POST /api/auth/mfa/activar { codigo } → servidor verifica el primer código → activa MFA
-```
+## TOTP sin dependencias (`src/auth/totp.ts`)
 
-## Flujo de login con MFA activo
+```ts
+import { createHmac, randomBytes } from "node:crypto";
 
-```
-1. POST /api/auth/login → contraseña OK + MFA activo → devuelve { mfaRequired: true, tempToken }
-2. Cliente muestra campo de código TOTP
-3. POST /api/auth/mfa/verificar { tempToken, codigo } → verifica código → devuelve access token real
-```
+const ALFA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; // Base32 (RFC 4648)
 
-## Implementación
-
-```typescript
-// auth/mfa.ts
-import { authenticator } from "otplib";
-import QRCode from "qrcode";
-
-const APP_NAME = process.env.APP_NAME ?? "MiApp";
-
-export function generarSecretoMFA(): string {
-  return authenticator.generateSecret(); // 20 bytes en Base32
+function base32Encode(buf: Buffer): string {
+  let bits = 0, valor = 0, out = "";
+  for (const b of buf) {
+    valor = (valor << 8) | b; bits += 8;
+    while (bits >= 5) { out += ALFA[(valor >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) out += ALFA[(valor << (5 - bits)) & 31];
+  return out;
+}
+function base32Decode(s: string): Buffer {
+  let bits = 0, valor = 0; const out: number[] = [];
+  for (const c of s.toUpperCase().replace(/=+$/, "")) {
+    const i = ALFA.indexOf(c); if (i < 0) continue;
+    valor = (valor << 5) | i; bits += 5;
+    if (bits >= 8) { out.push((valor >>> (bits - 8)) & 0xff); bits -= 8; }
+  }
+  return Buffer.from(out);
 }
 
-export async function generarQrUri(email: string, secreto: string): Promise<string> {
-  const uri = authenticator.keyuri(email, APP_NAME, secreto);
-  return QRCode.toDataURL(uri); // data:image/png;base64,...
+export function generarSecretoMfa(): string { return base32Encode(randomBytes(20)); }
+
+function codigoEn(secretBase32: string, t: number, paso = 30): string {
+  const contador = Math.floor(t / 1000 / paso);
+  const buf = Buffer.alloc(8); buf.writeBigInt64BE(BigInt(contador));
+  const h = createHmac("sha1", base32Decode(secretBase32)).update(buf).digest();
+  const off = h[h.length - 1] & 0xf;
+  const cod = ((h[off] & 0x7f) << 24) | ((h[off + 1] & 0xff) << 16) | ((h[off + 2] & 0xff) << 8) | (h[off + 3] & 0xff);
+  return (cod % 1_000_000).toString().padStart(6, "0");
 }
 
-export function verificarCodigoTOTP(secreto: string, codigo: string): boolean {
-  return authenticator.verify({ token: codigo, secret: secreto });
+/** Verifica con ±1 ventana de 30 s para tolerar desfase de reloj. */
+export function verificarTotp(secret: string, codigo: string, ventana = 1): boolean {
+  const ahora = Date.now();
+  for (let i = -ventana; i <= ventana; i++) if (codigoEn(secret, ahora + i * 30_000) === codigo) return true;
+  return false;
+}
+
+/** URI estándar para que la app de autenticación lo añada (por QR o a mano). */
+export function otpauthUri(email: string, secret: string): string {
+  const app = process.env.APP_NAME ?? "MiApp";
+  return `otpauth://totp/${encodeURIComponent(app)}:${encodeURIComponent(email)}` +
+    `?secret=${secret}&issuer=${encodeURIComponent(app)}&period=30&digits=6`;
 }
 ```
 
-```typescript
-// routes/mfa.ts
+> QR: el servidor no genera imágenes (cero deps). Devuelve el `otpauthUri` + el secreto para alta manual; el
+> FRONT puede pintar el QR a partir del URI con un componente cliente ligero si quieres mejor UX.
+
+## Repo — métodos de MFA en `usuarios.repo.ts`
+
+```ts
+// interface UsuariosRepo
+leerMfa(id: string): { mfaSecret: string | null; mfaBackup: string | null } | undefined;
+guardarMfaSecret(id: string, secret: string | null): void;
+guardarBackup(id: string, backupJson: string | null): void;
+
+// UsuariosRepoSqlite
+leerMfa(id) {
+  return getDb().prepare("SELECT mfa_secret AS mfaSecret, mfa_backup AS mfaBackup FROM usuarios WHERE id = ?")
+    .get(id) as { mfaSecret: string | null; mfaBackup: string | null } | undefined;
+}
+guardarMfaSecret(id, secret) { getDb().prepare("UPDATE usuarios SET mfa_secret = ? WHERE id = ?").run(secret, id); }
+guardarBackup(id, backupJson) { getDb().prepare("UPDATE usuarios SET mfa_backup = ? WHERE id = ?").run(backupJson, id); }
+```
+
+## Token "MFA pendiente" entre los dos pasos del login (`src/auth/mfa-pending.ts`)
+
+Es como la cookie de sesión pero corto y marcado como pendiente (mismo HMAC, sin meter una sesión real):
+
+```ts
+import { createHmac, timingSafeEqual } from "node:crypto";
+const SECRET = process.env.AUTH_SECRET ?? "dev-secret-cambia-esto-en-produccion";
+
+export function firmarPendiente(sub: string, ttl = 300): string {
+  const body = Buffer.from(JSON.stringify({ sub, exp: Math.floor(Date.now() / 1000) + ttl })).toString("base64url");
+  return `${body}.${createHmac("sha256", SECRET).update(body).digest("base64url")}`;
+}
+export function verificarPendiente(token: string | undefined): string | null {
+  if (!token) return null;
+  const [body, firma] = token.split(".");
+  if (!body || !firma) return null;
+  const esp = createHmac("sha256", SECRET).update(body).digest("base64url");
+  const a = Buffer.from(firma), b = Buffer.from(esp);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  try {
+    const p = JSON.parse(Buffer.from(body, "base64url").toString()) as { sub: string; exp: number };
+    return p.exp < Math.floor(Date.now() / 1000) ? null : p.sub;
+  } catch { return null; }
+}
+```
+
+## Cambio en el login (`src/auth/routes.ts`)
+
+Tras validar la contraseña, si el usuario tiene MFA NO emitas la cookie todavía:
+
+```ts
+// dentro de POST /api/auth/login, después de comprobar bcrypt y `u.activo`:
+if (repos.usuarios.leerMfa(u.id)?.mfaSecret) {
+  return { mfaRequired: true, pending: firmarPendiente(u.id) }; // el front pide el código
+}
+// si no, sigue igual: firmarSesion + reply.setCookie(COOKIE_SESION, …)
+```
+
+## Rutas de MFA (`src/auth/mfa.ts`)
+
+```ts
+import { randomBytes } from "node:crypto";
+import type { FastifyInstance } from "fastify";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import { eq } from "drizzle-orm";
-import { generarSecretoMFA, generarQrUri, verificarCodigoTOTP } from "../auth/mfa.js";
-import { firmarAccess } from "../auth/tokens.js";
-import { db, schema } from "../db/client.js";
+import { repos } from "../repos/index.js";
+import { firmarSesion } from "./tokens.js";
+import { COOKIE_SESION } from "./guard.js";
+import { generarSecretoMfa, verificarTotp, otpauthUri } from "./totp.js";
+import { verificarPendiente } from "./mfa-pending.js";
+import { auditar } from "../audit.js";
 
-const TEMP_SECRET  = process.env.JWT_TEMP_SECRET!;
-const TEMP_EXPIRES = "5m"; // el tempToken expira en 5 minutos
+const cookieOpts = { httpOnly: true, sameSite: "lax" as const, path: "/", secure: process.env.NODE_ENV === "production", maxAge: 60 * 60 * 8 };
 
-export async function registerMfaRoutes(app: FastifyInstance) {
-
-  // Paso 1: generar secreto y QR para activar MFA
-  app.get("/api/auth/mfa/setup", { preHandler: requireAuth }, async (req) => {
-    const secreto = generarSecretoMFA();
-    const qr      = await generarQrUri(req.user.email, secreto);
-
-    // Guardar secreto pendiente (aún sin activar)
-    await db().update(schema.usuarios)
-      .set({ mfaSecret: secreto, mfaActivado: false })
-      .where(eq(schema.usuarios.id, req.user.userId));
-
-    return { qr, secreto }; // el cliente muestra el QR; secreto solo para mostrar manual
+export function registerMfaRoutes(app: FastifyInstance): void {
+  // Alta paso 1: generar secreto (NO se guarda aún) — usuario ya autenticado (lo pone el guard)
+  app.get("/api/auth/mfa/setup", async (req) => {
+    const secreto = generarSecretoMfa();
+    return { secreto, uri: otpauthUri(req.usuario!.email, secreto) }; // el front guarda `secreto` para el paso 2
   });
 
-  // Paso 2: confirmar primer código y activar MFA
-  app.post("/api/auth/mfa/activar", { preHandler: requireAuth }, async (req, reply) => {
-    const { codigo } = req.body as { codigo: string };
+  // Alta paso 2: confirmar el primer código → activar + devolver códigos de respaldo (UNA vez)
+  app.post("/api/auth/mfa/activar", async (req, reply) => {
+    const { secreto, codigo } = req.body as { secreto: string; codigo: string };
+    if (!verificarTotp(secreto, codigo)) return reply.code(401).send({ error: "Código incorrecto" });
 
-    const rows = await db().select().from(schema.usuarios)
-      .where(eq(schema.usuarios.id, req.user.userId));
-    const usuario = rows[0];
-
-    if (!usuario?.mfaSecret) return reply.code(400).send({ error: "MFA no inicializado" });
-    if (!verificarCodigoTOTP(usuario.mfaSecret, codigo)) {
-      return reply.code(401).send({ error: "Código incorrecto" });
-    }
-
-    // Generar 8 códigos de backup de un solo uso
-    const backups = Array.from({ length: 8 }, () =>
-      crypto.randomBytes(4).toString("hex").toUpperCase().replace(/(.{4})/, "$1-"),
-    );
-    const backupsHash = await Promise.all(backups.map((b) => bcrypt.hash(b, 10)));
-
-    await db().update(schema.usuarios)
-      .set({ mfaActivado: true, mfaBackup: JSON.stringify(backupsHash) })
-      .where(eq(schema.usuarios.id, req.user.userId));
-
-    return { ok: true, backupCodes: backups }; // mostrar UNA SOLA VEZ al usuario
+    const respaldo = Array.from({ length: 8 }, () => randomBytes(4).toString("hex").toUpperCase());
+    const hashes = await Promise.all(respaldo.map((c) => bcrypt.hash(c, 10)));
+    repos.usuarios.guardarMfaSecret(req.usuario!.sub, secreto);
+    repos.usuarios.guardarBackup(req.usuario!.sub, JSON.stringify(hashes));
+    auditar({ accion: "usuario.mfa.activar", recurso: "usuario", recursoId: req.usuario!.sub, resultado: "ok", usuarioId: req.usuario!.sub, req });
+    return { ok: true, respaldo }; // muéstralos UNA sola vez
   });
 
-  // Login con MFA: verifica el código temporal + TOTP → emite access real
-  app.post("/api/auth/mfa/verificar", async (req, reply) => {
-    const { tempToken, codigo } = req.body as { tempToken: string; codigo: string };
+  // Login paso 2: verificar el código (o uno de respaldo) → emitir la cookie de sesión real
+  app.post("/api/auth/mfa/verificar", { config: { publico: true } }, async (req, reply) => {
+    const { pending, codigo } = req.body as { pending: string; codigo: string };
+    const sub = verificarPendiente(pending);
+    if (!sub) return reply.code(401).send({ error: "Sesión expirada, vuelve a entrar" });
 
-    let payload: any;
-    try {
-      payload = jwt.verify(tempToken, TEMP_SECRET);
-    } catch {
-      return reply.code(401).send({ error: "Sesión expirada, vuelve a hacer login" });
-    }
+    const u = repos.usuarios.buscarPorId(sub);
+    const mfa = repos.usuarios.leerMfa(sub);
+    if (!u || !mfa?.mfaSecret) return reply.code(400).send({ error: "Usuario sin MFA" });
 
-    const rows = await db().select().from(schema.usuarios)
-      .where(eq(schema.usuarios.id, payload.userId));
-    const usuario = rows[0];
-    if (!usuario?.mfaSecret) return reply.code(400).send({ error: "Usuario sin MFA" });
-
-    // Intentar código TOTP normal
-    if (verificarCodigoTOTP(usuario.mfaSecret, codigo)) {
-      const access = firmarAccess({ userId: usuario.id, email: usuario.email, rol: usuario.rol });
-      return { access, user: { id: usuario.id, email: usuario.email, nombre: usuario.nombre } };
-    }
-
-    // Intentar código de backup (de un solo uso)
-    const backups: string[] = JSON.parse(usuario.mfaBackup ?? "[]");
-    for (let i = 0; i < backups.length; i++) {
-      if (await bcrypt.compare(codigo.toUpperCase(), backups[i])) {
-        // Invalidar el código usado
-        backups.splice(i, 1);
-        await db().update(schema.usuarios)
-          .set({ mfaBackup: JSON.stringify(backups) })
-          .where(eq(schema.usuarios.id, usuario.id));
-        const access = firmarAccess({ userId: usuario.id, email: usuario.email, rol: usuario.rol });
-        return { access, user: { id: usuario.id, email: usuario.email, nombre: usuario.nombre } };
+    let ok = verificarTotp(mfa.mfaSecret, codigo);
+    if (!ok && mfa.mfaBackup) { // probar código de respaldo (un solo uso)
+      const restantes: string[] = JSON.parse(mfa.mfaBackup);
+      for (let i = 0; i < restantes.length; i++) {
+        if (await bcrypt.compare(codigo.toUpperCase(), restantes[i])) {
+          restantes.splice(i, 1);
+          repos.usuarios.guardarBackup(sub, JSON.stringify(restantes));
+          ok = true; break;
+        }
       }
     }
+    if (!ok) { auditar({ accion: "usuario.login", recurso: "usuario", resultado: "denegado", usuarioId: sub, req }); return reply.code(401).send({ error: "Código incorrecto" }); }
 
-    return reply.code(401).send({ error: "Código incorrecto" });
+    repos.usuarios.marcarAcceso(u.id, new Date().toISOString());
+    const token = firmarSesion({ sub: u.id, email: u.email, rol: u.rol });
+    reply.setCookie(COOKIE_SESION, token, cookieOpts);
+    auditar({ accion: "usuario.login", recurso: "usuario", recursoId: u.id, resultado: "ok", usuarioId: u.id, req });
+    return { usuario: { id: u.id, email: u.email, nombre: u.nombre, rol: u.rol } };
   });
 
-  // Desactivar MFA (requiere contraseña para confirmar)
-  app.delete("/api/auth/mfa", { preHandler: requireAuth }, async (req, reply) => {
+  // Desactivar MFA (pide la contraseña para confirmar)
+  app.delete("/api/auth/mfa", async (req, reply) => {
     const { password } = req.body as { password: string };
-    const rows = await db().select().from(schema.usuarios)
-      .where(eq(schema.usuarios.id, req.user.userId));
-    const usuario = rows[0];
-    if (!await bcrypt.compare(password, usuario.passwordHash)) {
+    const u = repos.usuarios.buscarPorEmail(req.usuario!.email);
+    if (!u?.passwordHash || !(await bcrypt.compare(password, u.passwordHash))) {
       return reply.code(401).send({ error: "Contraseña incorrecta" });
     }
-    await db().update(schema.usuarios)
-      .set({ mfaSecret: null, mfaActivado: false, mfaBackup: null })
-      .where(eq(schema.usuarios.id, req.user.userId));
+    repos.usuarios.guardarMfaSecret(req.usuario!.sub, null);
+    repos.usuarios.guardarBackup(req.usuario!.sub, null);
     return { ok: true };
   });
 }
 ```
 
-## Modificación del login para emitir tempToken si MFA activo
+Registra `registerMfaRoutes(app)` en `src/server.ts`. En el front: si el login responde `{ mfaRequired: true,
+pending }`, muestra el campo del código y POSTea a `/api/auth/mfa/verificar` con `{ pending, codigo }`.
 
-```typescript
-// En la ruta POST /api/auth/login existente, tras validar la contraseña:
-if (usuario.mfaActivado) {
-  const tempToken = jwt.sign(
-    { userId: usuario.id, email: usuario.email, rol: usuario.rol },
-    process.env.JWT_TEMP_SECRET!,
-    { expiresIn: "5m" },
-  );
-  // No emitir el access token todavía
-  return { mfaRequired: true, tempToken };
-}
-// Si MFA no activo → emitir tokens normalmente
-```
+## Reglas
 
-## Variables de entorno requeridas
+- Guarda los **códigos de respaldo** hasheados (bcrypt) y muéstralos en claro UNA vez al activar.
+- El paso 2 del login (`/mfa/verificar`) es `{ publico: true }` (aún no hay cookie); el `pending` firmado es lo
+  que prueba que ya pasó la contraseña.
+- MFA se apila igual sobre el login local Y sobre Google/Microsoft si quieres forzarlo (tras el callback,
+  comprueba `leerMfa` antes de emitir la cookie).
 
-```env
-JWT_TEMP_SECRET=otro_secreto_diferente_para_tokens_temporales
-APP_NAME=NombreDeTuApp
-```
-
-## Dependencias
-
-```
-npm install otplib qrcode
-npm install -D @types/qrcode
-```
+Relacionado: ensamblado `library/auth/login-system.md`; login base (en el andamiaje); Google/Microsoft
+`library/auth/auth-google-oauth.md`, `library/auth/auth-microsoft-entra.md`.

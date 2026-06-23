@@ -1,23 +1,27 @@
-# Autenticación con Google OAuth2
+# Login con Google (OAuth2) — emite la cookie de sesión del andamiaje
 
-**Categoría:** auth | **Cuándo usar:** Apps donde los usuarios ya tienen cuenta Google (B2C, apps internas de empresa con Google Workspace). Elimina la gestión de contraseñas.
+**Categoría:** auth | **Cuándo usar:** que los usuarios entren con su cuenta Google (B2C, o empresa con
+Google Workspace). Elimina la gestión de contraseñas. Se añade SOBRE el login propio del andamiaje
+(`templates/server-app`), no lo sustituye. **Esto es solo IDENTIDAD** (entrar) — para usar Drive/Gmail/etc.
+en nombre del usuario ver `library/integraciones/google-workspace.md`.
 
 **Trade-offs:**
-- ✅ Sin contraseñas que gestionar — la seguridad de la cuenta la da Google (con MFA de Google)
-- ✅ Login en 1 clic — muy baja fricción para el usuario final
-- ✅ El email ya está verificado (Google lo garantiza)
-- ❌ Dependencia de Google — si el servicio cae, el login cae con él
-- ❌ Requiere cuenta Google — no sirve para usuarios con otras cuentas
-- ❌ Necesita configuración en Google Cloud Console y dominio verificable para producción
+- ✅ Sin contraseñas que gestionar; login en 1 clic; el email ya viene verificado por Google.
+- ❌ Dependencia de Google; requiere cuenta Google; necesita configurar Google Cloud Console.
+
+> Convención CLAVE (coherente con el resto del andamiaje): al final del callback se emite **la MISMA cookie
+> de sesión** que el login local (`firmarSesion` + `reply.setCookie(COOKIE_SESION, …)`), y el acceso a datos
+> va por `repos.usuarios` (patrón Repository), nunca con SQL suelto ni Drizzle. Así el guard y el resto de la
+> app no distinguen cómo entró el usuario. NO se usan JWT access/refresh aquí: la sesión es la cookie.
 
 ## Configuración en Google Cloud Console
 
 ```
-1. Ir a console.cloud.google.com → Crear proyecto
+1. console.cloud.google.com → Crear proyecto
 2. APIs y servicios → Credenciales → Crear credenciales → ID de cliente OAuth 2.0
 3. Tipo de aplicación: Aplicación web
 4. Orígenes JS autorizados: http://localhost:3000 (dev) + https://tudominio.com (prod)
-5. URIs de redireccionamiento: http://localhost:3000/api/auth/google/callback
+5. URIs de redirección: http://localhost:3000/api/auth/google/callback
 6. Copiar CLIENT_ID y CLIENT_SECRET
 ```
 
@@ -27,176 +31,117 @@
 GOOGLE_CLIENT_ID=xxxxx.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=GOCSPX-xxxxx
 GOOGLE_CALLBACK_URL=http://localhost:3000/api/auth/google/callback
-FRONTEND_URL=http://localhost:5173
 ```
 
-## Esquema BD — usuarios sin contraseña
+## Requisito previo: extender el repo de usuarios
 
-```typescript
-// Añadir a la tabla usuarios (compatible con auth-local si se usa auth mixta)
-export const usuarios = pgTable("usuarios", {
-  id:           text("id").primaryKey(),
-  email:        text("email").notNull().unique(),
-  nombre:       text("nombre").notNull(),
-  avatar:       text("avatar"),
-  rol:          text("rol", { enum: ["admin", "usuario"] }).notNull().default("usuario"),
-  // OAuth providers — null si solo usa login local
-  googleId:     text("google_id").unique(),
-  passwordHash: text("password_hash"),   // null si solo usa OAuth
-  creadoEn:     timestamp("creado_en").notNull().defaultNow(),
-  ultimoAcceso: timestamp("ultimo_acceso"),
-});
-```
+Añade los métodos de OAuth a `usuarios.repo.ts` (`buscarPorGoogleId`, `vincularProveedor`, `crearDesdeOAuth`)
+una sola vez — el bloque está en `library/auth/login-system.md` ("Extender el repo de usuarios para OAuth").
 
-## Implementación — flujo OAuth2 manual (sin Passport)
+## Rutas de login con Google (`src/auth/google.ts`)
 
-```typescript
-// routes/auth-google.ts
-import { eq } from "drizzle-orm";
-import { ulid } from "ulid";
-import { firmarAccess, firmarRefresh } from "../auth/tokens.js";
-import { db, schema } from "../db/client.js";
+```ts
+import { randomUUID } from "node:crypto";
+import type { FastifyInstance } from "fastify";
+import { repos } from "../repos/index.js";
+import { firmarSesion } from "./tokens.js";
+import { COOKIE_SESION } from "./guard.js";
+import { auditar } from "../audit.js";
 
-const GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const GOOGLE_USERINFO  = "https://www.googleapis.com/oauth2/v2/userinfo";
+const GOOGLE_USERINFO = "https://www.googleapis.com/oauth2/v2/userinfo";
 
-const COOKIE_OPTS = {
+// MISMA cookie de sesión que el login local (ver src/auth/routes.ts).
+const cookieOpts = {
   httpOnly: true,
-  secure:   process.env.NODE_ENV === "production",
   sameSite: "lax" as const,
-  path:     "/",
-  maxAge:   60 * 60 * 24 * 30,
+  path: "/",
+  secure: process.env.NODE_ENV === "production",
+  maxAge: 60 * 60 * 8,
 };
 
-export async function registerGoogleAuthRoutes(app: FastifyInstance) {
-
-  // Paso 1: redirigir a Google
-  app.get("/api/auth/google", (_req, reply) => {
+export function registerGoogleAuthRoutes(app: FastifyInstance): void {
+  // Paso 1: redirigir a Google (público: aún no hay sesión)
+  app.get("/api/auth/google", { config: { publico: true } }, (_req, reply) => {
     const params = new URLSearchParams({
-      client_id:     process.env.GOOGLE_CLIENT_ID!,
-      redirect_uri:  process.env.GOOGLE_CALLBACK_URL!,
+      client_id: process.env.GOOGLE_CLIENT_ID!,
+      redirect_uri: process.env.GOOGLE_CALLBACK_URL!,
       response_type: "code",
-      scope:         "openid email profile",
-      access_type:   "offline",
-      prompt:        "select_account",
+      scope: "openid email profile",
+      prompt: "select_account",
     });
     return reply.redirect(`${GOOGLE_AUTH_URL}?${params}`);
   });
 
-  // Paso 2: callback — intercambiar código por tokens
-  app.get("/api/auth/google/callback", async (req, reply) => {
+  // Paso 2: callback — intercambiar el code, identificar/crear y emitir la cookie de sesión
+  app.get("/api/auth/google/callback", { config: { publico: true } }, async (req, reply) => {
     const { code, error } = req.query as { code?: string; error?: string };
+    if (error || !code) return reply.redirect("/login?error=google");
 
-    if (error || !code) {
-      return reply.redirect(`${process.env.FRONTEND_URL}/login?error=google_cancelado`);
-    }
-
-    // Intercambiar código por access token de Google
+    // code → access token de Google
     const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         code,
-        client_id:     process.env.GOOGLE_CLIENT_ID!,
+        client_id: process.env.GOOGLE_CLIENT_ID!,
         client_secret: process.env.GOOGLE_CLIENT_SECRET!,
-        redirect_uri:  process.env.GOOGLE_CALLBACK_URL!,
-        grant_type:    "authorization_code",
+        redirect_uri: process.env.GOOGLE_CALLBACK_URL!,
+        grant_type: "authorization_code",
       }),
     });
+    if (!tokenRes.ok) return reply.redirect("/login?error=google_token");
+    const { access_token } = (await tokenRes.json()) as { access_token: string };
 
-    if (!tokenRes.ok) {
-      return reply.redirect(`${process.env.FRONTEND_URL}/login?error=google_token`);
-    }
+    // access token → perfil
+    const perfilRes = await fetch(GOOGLE_USERINFO, { headers: { Authorization: `Bearer ${access_token}` } });
+    const perfil = (await perfilRes.json()) as { id: string; email: string; name: string };
+    const email = perfil.email.toLowerCase().trim();
 
-    const tokens     = await tokenRes.json() as { access_token: string };
-    const profileRes = await fetch(GOOGLE_USERINFO, {
-      headers: { Authorization: `Bearer ${tokens.access_token}` },
-    });
-    const perfil = await profileRes.json() as {
-      id: string; email: string; name: string; picture: string;
-    };
-
-    // Buscar o crear usuario
-    const rows = await db().select().from(schema.usuarios)
-      .where(eq(schema.usuarios.googleId, perfil.id));
-
-    let usuario = rows[0];
-
+    // Identificar o crear el usuario (por google_id; si ya existe por email, vincular)
+    let usuario = repos.usuarios.buscarPorGoogleId(perfil.id);
     if (!usuario) {
-      // Comprobar si ya existe por email (login local previo)
-      const porEmail = await db().select().from(schema.usuarios)
-        .where(eq(schema.usuarios.email, perfil.email));
-
-      if (porEmail.length) {
-        // Vincular Google a la cuenta existente
-        await db().update(schema.usuarios)
-          .set({ googleId: perfil.id, avatar: perfil.picture })
-          .where(eq(schema.usuarios.id, porEmail[0].id));
-        usuario = { ...porEmail[0], googleId: perfil.id };
+      const porEmail = repos.usuarios.buscarPorEmail(email);
+      if (porEmail) {
+        repos.usuarios.vincularProveedor(porEmail.id, "google_id", perfil.id);
+        usuario = { id: porEmail.id, email: porEmail.email, nombre: porEmail.nombre, rol: porEmail.rol };
       } else {
-        // Crear cuenta nueva
-        const id = ulid().toLowerCase();
-        await db().insert(schema.usuarios).values({
-          id,
-          email:    perfil.email,
-          nombre:   perfil.name,
-          avatar:   perfil.picture,
-          googleId: perfil.id,
-        });
-        usuario = (await db().select().from(schema.usuarios).where(eq(schema.usuarios.id, id)))[0];
+        const id = randomUUID();
+        repos.usuarios.crearDesdeOAuth({ id, email, nombre: perfil.name, rol: "usuario", googleId: perfil.id });
+        usuario = { id, email, nombre: perfil.name, rol: "usuario" };
       }
     }
 
-    // Actualizar último acceso y avatar
-    await db().update(schema.usuarios)
-      .set({ ultimoAcceso: new Date(), avatar: perfil.picture })
-      .where(eq(schema.usuarios.id, usuario.id));
-
-    // Emitir tokens propios de la app
-    const payload = { userId: usuario.id, email: usuario.email, rol: usuario.rol };
-    const access  = firmarAccess(payload);
-    const refresh = firmarRefresh(payload);
-
-    reply.setCookie("refresh_token", refresh, COOKIE_OPTS);
-
-    // Redirigir al frontend con el access token (pasarlo por query param o fragment)
-    return reply.redirect(
-      `${process.env.FRONTEND_URL}/auth/callback?token=${encodeURIComponent(access)}`,
-    );
+    repos.usuarios.marcarAcceso(usuario.id, new Date().toISOString());
+    const token = firmarSesion({ sub: usuario.id, email: usuario.email, rol: usuario.rol });
+    reply.setCookie(COOKIE_SESION, token, cookieOpts); // ← la MISMA cookie que el login local
+    auditar({ accion: "usuario.login", recurso: "usuario", recursoId: usuario.id, resultado: "ok", usuarioId: usuario.id, req });
+    return reply.redirect("/"); // a la app, ya con sesión
   });
 }
 ```
 
-## Cliente Vue — recibir el token del callback
+Registra `registerGoogleAuthRoutes(app)` en `src/server.ts` (junto a `registerAuthRoutes`).
 
-```typescript
-// views/AuthCallback.vue
-import { onMounted } from "vue";
-import { useRouter, useRoute } from "vue-router";
-import { useAuth } from "../composables/useAuth.js";
+## Encender el botón en la pantalla de login
 
-const route  = useRoute();
-const router = useRouter();
-const { setToken } = useAuth();
-
-onMounted(() => {
-  const token = route.query.token as string;
-  if (token) {
-    setToken(token);
-    router.push("/dashboard");
-  } else {
-    router.push("/login?error=1");
-  }
-});
-```
-
-## Botón de login en LoginView.vue
+En `web/src/views/LoginView.vue` pon `proveedoresExternos = true` (o usa `templates/web/login-view.md`). El
+botón es un simple enlace — el flujo entero ocurre en el servidor y vuelve a `/` con la cookie puesta:
 
 ```vue
-<template>
-  <a href="/api/auth/google" class="btn-google">
-    <img src="/google-icon.svg" width="20" /> Continuar con Google
-  </a>
-</template>
+<a href="/api/auth/google" class="btn btn-secundario">Continuar con Google</a>
 ```
+
+## Reglas
+
+- Un usuario de OAuth no tiene contraseña (`password_hash` NULL) → el login local lo rechaza solo (bcrypt
+  contra un hash falso); solo entra por Google. Bien.
+- Vincula por email si la cuenta ya existía (login local previo) para no duplicar usuarios.
+- El callback es `{ publico: true }` (Google no manda nuestra cookie); la seguridad real la pone el guard en
+  el resto de `/api`.
+- Esto es LOGIN. Para llamar a las APIs de Google en nombre del usuario (Drive/Gmail/Calendar/Sheets/Contacts/
+  Tasks) necesitas tokens con scopes y guardarlos: `library/integraciones/google-workspace.md`.
+
+Relacionado: ensamblado `library/auth/login-system.md`; Microsoft `library/auth/auth-microsoft-entra.md`;
+MFA `library/auth/auth-mfa-totp.md`; servicios Google `library/integraciones/google-workspace.md`.

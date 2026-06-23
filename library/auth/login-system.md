@@ -31,6 +31,41 @@ reply.setCookie(COOKIE_SESION, token, cookieOpts); // la MISMA cookie que el log
 return reply.redirect("/"); // a la app, ya con sesión
 ```
 
+## Extender el repo de usuarios para OAuth (una vez, lo comparten Google y Microsoft)
+
+El `usuarios.repo.ts` del andamiaje cubre el login con contraseña. Para los proveedores externos añade estos
+métodos al puerto `UsuariosRepo` y a `UsuariosRepoSqlite` (las columnas `google_id`/`microsoft_id` ya existen
+en la tabla). Un usuario de OAuth se crea SIN contraseña (`password_hash` NULL) → solo entra por su proveedor.
+
+```ts
+// añadir al interface UsuariosRepo
+buscarPorGoogleId(googleId: string): Usuario | undefined;
+buscarPorMicrosoftId(microsoftId: string): Usuario | undefined;
+vincularProveedor(id: string, campo: "google_id" | "microsoft_id", valor: string): void;
+crearDesdeOAuth(u: { id: string; email: string; nombre: string; rol: string;
+                     googleId?: string; microsoftId?: string }): void;
+
+// añadir a UsuariosRepoSqlite
+buscarPorGoogleId(googleId: string): Usuario | undefined {
+  return getDb().prepare("SELECT id, email, nombre, rol FROM usuarios WHERE google_id = ?")
+    .get(googleId) as Usuario | undefined;
+}
+buscarPorMicrosoftId(microsoftId: string): Usuario | undefined {
+  return getDb().prepare("SELECT id, email, nombre, rol FROM usuarios WHERE microsoft_id = ?")
+    .get(microsoftId) as Usuario | undefined;
+}
+vincularProveedor(id: string, campo: "google_id" | "microsoft_id", valor: string): void {
+  // `campo` es un literal acotado (no entrada del usuario) → seguro interpolarlo.
+  getDb().prepare(`UPDATE usuarios SET ${campo} = ? WHERE id = ?`).run(valor, id);
+}
+crearDesdeOAuth(u): void {
+  getDb().prepare(
+    `INSERT INTO usuarios (id, email, password_hash, nombre, rol, activo, google_id, microsoft_id, creado)
+     VALUES (?, ?, NULL, ?, ?, 1, ?, ?, ?)`,
+  ).run(u.id, u.email, u.nombre, u.rol, u.googleId ?? null, u.microsoftId ?? null, new Date().toISOString());
+}
+```
+
 ## Activar proveedores externos (solo si el ADR del proyecto los pide)
 
 El usuario elige en lenguaje llano qué quiere; queda en el ADR de arquitectura. Para cada uno:

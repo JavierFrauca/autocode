@@ -1,5 +1,10 @@
 # Autenticación con JWT (JSON Web Tokens)
 
+> ⚠️ **COHERENCIA.** Las apps WEB del andamiaje (`templates/server-app`) NO usan JWT: usan **cookie de sesión
+> firmada** (`src/auth/tokens.ts`, HMAC con `node:crypto`) — ver `library/auth/login-system.md`. Este doc aplica
+> sobre todo al 4º tipo de app **"api"** (servicio sin pantallas, clientes externos) o a integraciones móviles;
+> para una app web con login de usuario, usa la cookie de sesión del andamiaje, no JWT.
+
 **Categoría:** auth | **Cuándo usar:** APIs REST con clientes móviles o web sin estado de sesión servidor
 
 ## Concepto

@@ -1,5 +1,13 @@
 # Autenticación local completa — email + contraseña + JWT
 
+> ⚠️ **COHERENCIA — leer primero.** En el andamiaje dorado (`templates/server-app`) el login local **YA
+> está construido y verificado**, y con OTRAS convenciones: **cookie de sesión firmada** (`src/auth/tokens.ts`,
+> HMAC-SHA256 con `node:crypto`, sin JWT) + **better-sqlite3 detrás de `repos.usuarios`** (sin Drizzle/Postgres)
+> + guard secure-by-default. **NO recrees el login con el código de ESTE fichero** (Drizzle/pgTable/JWT
+> access-refresh): desentona y duplica. La fuente de verdad es `library/auth/login-system.md` + el andamiaje.
+> Este documento se conserva como referencia conceptual (hash, reset, flujos) y para contextos SIN el
+> andamiaje. Para apps generadas, sigue las convenciones del andamiaje.
+
 **Categoría:** auth | **Cuándo usar:** La opción base para cualquier app. Sin dependencias de proveedores externos. Combina bien con MFA (ver `auth-mfa-totp.md`).
 
 **Trade-offs vs otras opciones:**
