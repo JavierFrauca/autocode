@@ -1,6 +1,6 @@
 {
   "name": "autocode",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "main": "out/main/index.js",
   "scripts": {
@@ -26,6 +26,7 @@
     "better-sqlite3": "^11.3.0",
     "diff": "^7.0.0",
     "drizzle-orm": "^0.36.4",
+    "electron-updater": "^6.8.9",
     "fastify": "^5.1.0",
     "gray-matter": "^4.0.3",
     "lucide-vue-next": "^1.0.0",
@@ -89,6 +90,14 @@
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "JavierFrauca",
+        "repo": "autocode",
+        "releaseType": "release"
+      }
+    ],
     "win": {
       "target": "nsis"
     },

@@ -4,6 +4,7 @@ import { useAppStore } from "./stores";
 import "./style.css";
 import TopNav from "./components/TopNav.vue";
 import LlmActivityPanel from "./components/LlmActivityPanel.vue";
+import UpdateBanner from "./components/UpdateBanner.vue";
 
 const app = useAppStore();
 
@@ -27,5 +28,6 @@ onMounted(async () => {
       <router-view />
     </div>
     <LlmActivityPanel />
+    <UpdateBanner />
   </div>
 </template>

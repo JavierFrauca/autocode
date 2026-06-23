@@ -39,6 +39,9 @@ const isElectron = typeof window !== "undefined" && !!(window as any).autocode?.
 function winMinimize() { (window as any).autocode?.minimize(); }
 function winMaximize() { (window as any).autocode?.maximize(); }
 function winClose()    { (window as any).autocode?.close(); }
+
+// Buscar actualizaciones a mano: el UpdateBanner escucha este evento, comprueba y muestra el resultado.
+function buscarActualizaciones() { window.dispatchEvent(new CustomEvent("autocode-check-updates")); }
 </script>
 
 <template>
@@ -47,7 +50,12 @@ function winClose()    { (window as any).autocode?.close(); }
     <span class="topnav-brand" title="Inicio" @click="router.push('/')">
       Auto<span class="topnav-brand-code">Code</span>
     </span>
-    <span class="topnav-version" :title="`AutoCode v${version}`">v{{ version }}</span>
+    <span
+      class="topnav-version"
+      :title="`AutoCode v${version} — clic para buscar actualizaciones`"
+      role="button"
+      @click="buscarActualizaciones"
+    >v{{ version }}</span>
 
     <!-- Dentro de un proyecto -->
     <template v-if="inProject">
@@ -156,7 +164,10 @@ function winClose()    { (window as any).autocode?.close(); }
   user-select: none;
   letter-spacing: .2px;
   align-self: center;
+  cursor: pointer;
+  transition: background .12s, color .12s;
 }
+.topnav-version:hover { background: var(--bg-active, var(--bg-hover)); color: var(--text); }
 .topnav-brand-code {
   background: linear-gradient(120deg, var(--accent) 0%, #A855F7 60%, #EC4899 100%);
   -webkit-background-clip: text;

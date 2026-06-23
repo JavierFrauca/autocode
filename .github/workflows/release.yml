@@ -1,0 +1,53 @@
+name: Release
+
+# Publica una versión en GitHub Releases al empujar un tag tipo v0.1.2.
+# electron-builder sube el instalador (.exe), su .blockmap y el latest.yml — este último es el
+# manifiesto que la app lee con electron-updater para detectar e instalar versiones nuevas.
+#
+# Cómo lanzar una versión:
+#   1) (opcional) ajusta el changelog
+#   2) git tag v0.1.2 && git push origin v0.1.2
+# La versión del tag MANDA: este workflow la escribe en package.json antes de construir.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}   # permite lanzarlo a mano desde la pestaña Actions
+
+permissions:
+  contents: write          # necesario para que GITHUB_TOKEN cree la Release
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Fijar versión desde el tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Publicando versión $VERSION"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Construir (electron-vite)
+        run: npm run build
+
+      - name: Publicar en GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AUTOCODE_NO_BUMP: "1"   # la versión ya la fija el tag; no la subas otra vez
+        run: npx --no-install electron-builder --win --publish always

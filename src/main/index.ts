@@ -3,6 +3,7 @@ import path from "node:path";
 import { startServer } from "./server";
 import { stopQdrant } from "./qdrant/launcher";
 import { stopAllPreviews } from "./routes/preview";
+import { setupAutoUpdater } from "./updater";
 
 const isDev = !app.isPackaged;
 
@@ -51,6 +52,9 @@ app.whenReady().then(async () => {
   }
 
   const win = await createWindow();
+
+  // Auto-actualización: comprueba GitHub Releases, descarga la versión nueva y la instala (con aviso).
+  setupAutoUpdater(win);
 
   ipcMain.handle("autocode:select-folder", async () => {
     const r = await dialog.showOpenDialog(win, { properties: ["openDirectory", "createDirectory"] });
