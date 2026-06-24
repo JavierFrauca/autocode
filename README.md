@@ -19,8 +19,9 @@ AutoCode es una **aplicación de escritorio local, monopuesto y autocontenida** 
    proyecto.
 2. **Aplicaciones generadas** sobre un stack cerrado, entregadas listas para usar.
 
-El usuario nunca ve código mientras conversa. Ve chat, documentos renderizados, búsqueda semántica
-sobre lo que ha ido decidiendo, versiones que funcionan, y al final un artefacto ejecutable.
+El usuario nunca ve código mientras conversa. Ve chat, documentos renderizados (con **galería de
+pantallas** y **«Modificar con IA»** sobre cada boceto), búsqueda semántica sobre lo que ha ido
+decidiendo, una pestaña **Ejecutar** para probar y distribuir la app, y al final un artefacto ejecutable.
 
 > **Importante:** Docker es solo para **las apps que AutoCode genera** (y, opcionalmente, para aislar
 > sus pruebas). **AutoCode en sí NO necesita Docker** ni servidores externos.
@@ -46,21 +47,25 @@ Proyecto **npm** único gestionado con **electron-vite**. Un solo `npm run dev` 
 - **Escritorio**: Electron.
 - **Persistencia**: **SQLite** (`better-sqlite3` + Drizzle ORM). Fichero en `%APPDATA%/AutoCode/autocode.db`.
   No hay Postgres.
-- **Búsqueda semántica**: **Qdrant** como binario local, **descargado automáticamente** en el primer
-  arranque (`src/main/qdrant/launcher.ts`). Datos en `%APPDATA%/AutoCode/qdrant/`. Una colección por proyecto.
-- **Embeddings**: **locales y en proceso** (`bge-m3` a 1024 dimensiones vía ONNX / `@huggingface/transformers`),
-  descargados en el primer arranque. **El usuario no configura nada de embeddings.**
+- **Búsqueda semántica + embeddings**: **Nucleus**, un motor RAG propio escrito en Rust, embebido
+  **in-process como DLL** (`vendor/nucleus/nucleus.dll`, vía **koffi** en un `worker_thread` —
+  `src/main/nucleus/`). En una sola pieza hace almacenamiento (redb), **embeddings**
+  (`multilingual-e5-small`, 384d, en proceso) y **búsqueda híbrida vector + BM25**: **sin servidor, sin
+  puerto, sin sidecar**. BBDD en `C:\ProgramData\AutoCode\nucleus.redb`; el modelo se descarga solo la
+  primera vez. **Un dominio por proyecto.** El usuario no configura nada de búsqueda ni embeddings.
 - **LLM de generación**: el usuario **conecta un proveedor directamente** (ver [§6](#6-proveedores-y-modelos-de-llm)).
 
 ```
 src/
   main/       ← Electron main + Fastify embebido + agentes + acceso a datos
+    nucleus/  ← cliente del motor RAG (DLL) + worker_thread + indexado diferido
   preload/    ← contextBridge (window.api)
   renderer/   ← Vue 3 (UI)
   shared/     ← tipos TypeScript compartidos
 prompts/      ← system prompts (Markdown)
 templates/    ← andamiajes "dorados" y plantillas de código
 library/      ← biblioteca de patrones reutilizables
+vendor/       ← nucleus.dll (motor RAG in-process; se reparte con el instalador)
 ```
 
 ### Stack de las apps que AutoCode **genera**
@@ -79,7 +84,7 @@ AutoCode sabe generar **tres tipos** de aplicación (el tipo se deriva de un ADR
    Usuario (NL) ──► Chat ──► Agente "documenter" ──► Markdown (papers vivos)
                               │                          │
                               ▼                          ▼
-                          SQLite                     Qdrant (semántica)
+                          SQLite                     Nucleus (semántica)
                                                          │
                                                          ▼
                                        Agente "planner" (plan vivo por sprints)
@@ -93,7 +98,7 @@ AutoCode sabe generar **tres tipos** de aplicación (el tipo se deriva de un ADR
 
 - **Todo el chat** se persiste en SQLite.
 - **Cada turno relevante** dispara al agente *documenter*, que crea/modifica papers Markdown.
-- **Cada cambio de Markdown** se reindexa en Qdrant para búsqueda semántica (RAG).
+- **Cada cambio de Markdown** se reindexa en Nucleus para búsqueda semántica (RAG).
 - La app se construye desde los papers vigentes mediante el **agente builder** (ver [§7](#7-cómo-se-construye-la-app-el-motor)).
 
 Detalle (algunos ADR están parcialmente desfasados, ver [§10](#10-estado-de-los-adr)):
@@ -105,27 +110,28 @@ Detalle (algunos ADR están parcialmente desfasados, ver [§10](#10-estado-de-lo
 Un usuario gestiona **N proyectos** simultáneos. Cada uno tiene:
 - Una **carpeta raíz** en disco (la que elija el usuario) con sus papers Markdown.
 - Su estado indexado en SQLite por `project_id`.
-- Una **colección Qdrant propia** por aislamiento real.
+- Un **dominio Nucleus propio** (`proj:<id>`) por aislamiento real de la búsqueda.
 
 ## 6. Proveedores y modelos de LLM
 
 AutoCode habla el dialecto **OpenAI-compatible**, así que conecta proveedores **directamente** —
 **LiteLLM ya no es obligatoria** (es solo un preset "local / avanzado"). Hay **dos modos**:
 
-- **En la nube (recomendado)**: eliges proveedor, pegas tu **API key** y "Conectar y traer modelos"
-  rellena los desplegables vía `GET /v1/models`. Proveedores con preset:
-  **Anthropic, OpenAI, DeepSeek, Qwen, Kimi (Moonshot), Groq, OpenRouter** (ver `src/main/llm/providers.ts`).
+- **En la nube (recomendado)**: eliges proveedor y pegas tu **API key**. Nada más: los **modelos van
+  PRESELECCIONADOS** por proveedor (`defaultMain`/`defaultFast` en `src/main/llm/providers.ts` — el único
+  punto de mantenimiento cuando un proveedor saca modelo nuevo). Un **«Avanzado»** plegado permite
+  cambiarlos. Proveedores: **Anthropic, OpenAI, DeepSeek, Qwen, Kimi (Moonshot), Groq, OpenRouter**.
 - **En tu equipo (local / avanzado)**: pones tu propia URL OpenAI-compatible
-  (**Ollama / LM Studio / LiteLLM**) y eliges los modelos.
+  (**Ollama / LM Studio / LiteLLM**) y ahí sí eliges los modelos ("traer modelos" vía `GET /v1/models`).
 
-De cara al usuario solo hay **dos perillas**:
+Internamente solo hay **dos modelos**:
 
-| Perilla | Alimenta |
+| Modelo | Alimenta |
 |---|---|
-| **Modelo principal** | los roles internos `chat`, `code` y `docs` |
-| **Modelo rápido** | el rol interno `cheap` (títulos, clasificación, resúmenes cortos) |
+| **Principal** | los roles internos `chat`, `code` y `docs` |
+| **Rápido** | el rol interno `cheap` (títulos, clasificación, resúmenes cortos) |
 
-Los **embeddings** son un quinto rol, pero van **siempre locales** (`bge-m3`, ONNX) y no se configuran.
+Los **embeddings** ya no son un rol configurable: los hace **Nucleus** en local (`multilingual-e5-small`).
 
 > ⚠️ El **modelo principal debe soportar function-calling (tool-calling)**: el agente builder lo
 > EXIGE. AutoCode lo comprueba al conectar.
@@ -160,8 +166,8 @@ el instalador no carga el binario.
 ### Distribución (apps de escritorio)
 
 Una app que compila no sirve de nada si el usuario final no sabe construirla. Por eso, para las apps
-de escritorio, AutoCode prepara un **instalador** repartible bajo demanda (botón "Preparar para
-distribuir" en *Generar app*). El agente **packager** (`src/main/agents/packager.ts`) instala las
+de escritorio, AutoCode prepara un **instalador** repartible bajo demanda (botón "Preparar instalador"
+en la pestaña *Ejecutar*). El agente **packager** (`src/main/agents/packager.ts`) instala las
 dependencias, construye con electron-vite y empaqueta con **electron-builder** un **instalador NSIS
 (`.exe`)** que el destinatario instala con doble clic (crea acceso directo y desinstalador). El nombre
 del proyecto da nombre al instalable. El andamiaje trae la config (`templates/electron-app/electron-builder.yml`
@@ -174,19 +180,20 @@ minutos y baja ~100 MB la primera vez.
 Al abrir AutoCode por primera vez (pantalla de Ajustes → "Servidor de IA"):
 
 1. **Carpeta raíz** donde vivirán los proyectos.
-2. **Modo nube**: proveedor + API key + modelo principal + modelo rápido.
+2. **Modo nube**: proveedor + API key (los modelos ya vienen preseleccionados).
    **Modo local**: URL OpenAI-compatible + modelos.
 
-No se pide ni Postgres ni URL de Qdrant ni nada de embeddings: SQLite, el binario de Qdrant y el
-modelo de embeddings se gestionan solos. A partir de aquí, **todo lo demás es conversación**.
+No se pide ni Postgres, ni URL de búsqueda, ni nada de embeddings: SQLite y **Nucleus** (su BBDD en
+`C:\ProgramData\AutoCode` y su modelo de embeddings) se gestionan solos. A partir de aquí, **todo lo
+demás es conversación**.
 
 ## 9. Estado del proyecto
 
 Prototipo / alfa funcional. Implementado y verificado: el motor de agente único, el gate determinista,
-el andamiaje dorado, la verificación visual, la máquina del tiempo, los proveedores cloud y los
-embeddings locales (`npm test` → vitest en verde). **Pendiente**: validar "Generar app" de punta a
-punta por la UI sobre proyectos reales complejos (lo probado en vivo son tareas acotadas + una demo
-SEPA real).
+el andamiaje dorado, la verificación visual, la máquina del tiempo, los proveedores cloud y el **motor
+RAG Nucleus** (búsqueda + embeddings in-process por DLL; `npm test` en verde + smoke end-to-end de
+ingest/búsqueda). **Pendiente**: validar "Generar app" de punta a punta por la UI sobre proyectos reales
+complejos (lo probado en vivo son tareas acotadas + una demo SEPA real).
 
 ## 10. Estado de los ADR
 
@@ -198,7 +205,7 @@ decisión original). Estado actual:
 |---|---|
 | [0001 — Stack cerrado Vue/Node](docs/adr/0001-stack-cerrado-vue-node.md) | Vigente |
 | [0002 — Pasarela hacia los modelos LLM](docs/adr/0002-litellm-como-unico-gateway-llm.md) | **Revisado (v2)** → proveedores cloud directos; LiteLLM = preset local. Ver [§6](#6-proveedores-y-modelos-de-llm) |
-| [0003 — SQLite + Qdrant local, multi-proyecto](docs/adr/0003-postgres-qdrant-y-multi-proyecto.md) | Vigente (ya migrado a SQLite; nota de embeddings locales fijos) |
+| [0003 — SQLite + búsqueda local, multi-proyecto](docs/adr/0003-postgres-qdrant-y-multi-proyecto.md) | **Revisado** → SQLite + **Nucleus** (motor RAG propio en Rust, embebido por DLL) reemplaza a Qdrant y a los embeddings `bge-m3`; un dominio por proyecto. Ver [§3](#3-stack) |
 | [0004 — Markdown como fuente de verdad](docs/adr/0004-markdown-como-fuente-de-verdad.md) | Vigente |
 | [0005 — Chat vs documentos vivos](docs/adr/0005-chat-vs-documentos-vivos.md) | Vigente |
 | [0006 — Agentes y pipeline de cambios](docs/adr/0006-agentes-y-pipeline-de-cambios.md) | **Revisado (v2)** → agente builder único + gate determinista. Ver [§7](#7-cómo-se-construye-la-app-el-motor) |
@@ -218,8 +225,9 @@ decisión original). Estado actual:
   correr `pnpm` rompe el árbol de `node_modules`).
 - Una API key de un proveedor de LLM (modo nube) **o** un endpoint local OpenAI-compatible.
 
-AutoCode **no** necesita Docker ni Postgres: SQLite embebido, binario de Qdrant local y modelo de
-embeddings se descargan/crean solos en `%APPDATA%/AutoCode/`.
+AutoCode **no** necesita Docker, Postgres ni ningún servidor de búsqueda: SQLite embebido
+(`%APPDATA%/AutoCode/`) y **Nucleus** in-process por DLL (BBDD + modelo en `C:\ProgramData\AutoCode/`,
+descargado solo la primera vez).
 
 ### Desarrollo
 

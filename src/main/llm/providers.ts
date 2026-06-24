@@ -17,6 +17,14 @@ export interface ProviderPreset {
    * El usuario siempre puede teclear un modelo a mano; esto es solo para poblar el desplegable.
    */
   curatedModels?: string[];
+  /**
+   * Modelos PRESELECCIONADOS para este proveedor. El usuario normal NO elige modelo: pega su API key
+   * y AutoCode usa estos. Si un ID se queda obsoleto, se cambia AQUÍ (único punto de mantenimiento) y
+   * sale en la siguiente versión; mientras tanto, "Avanzado" permite sobreescribirlos a mano.
+   * `defaultMain` debe soportar function-calling (lo exige el agente builder).
+   */
+  defaultMain?: string;
+  defaultFast?: string;
 }
 
 export const PROVIDERS: Record<ProviderId, ProviderPreset> = {
@@ -30,20 +38,28 @@ export const PROVIDERS: Record<ProviderId, ProviderPreset> = {
       "claude-sonnet-4-6",
       "claude-haiku-4-5",
     ],
+    defaultMain: "claude-sonnet-4-6",
+    defaultFast: "claude-haiku-4-5",
   },
   openai: {
     id: "openai",
     label: "OpenAI",
     tier: "cloud",
     root: "https://api.openai.com",
-    curatedModels: ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "o4-mini"],
+    // `gpt-5.5` sigue al último snapshot DENTRO de la familia 5.5 (no salta solo a la 6.x).
+    curatedModels: ["gpt-5.5", "gpt-5.5-pro", "gpt-5.4-mini", "gpt-5.4-nano"],
+    defaultMain: "gpt-5.5",
+    defaultFast: "gpt-5.4-mini",
   },
   deepseek: {
     id: "deepseek",
     label: "DeepSeek",
     tier: "cloud",
     root: "https://api.deepseek.com",
-    curatedModels: ["deepseek-chat", "deepseek-reasoner"],
+    // OJO: los alias `deepseek-chat`/`deepseek-reasoner` se APAGAN el 2026-07-24. Hay que usar V4.
+    curatedModels: ["deepseek-v4-pro", "deepseek-v4-flash"],
+    defaultMain: "deepseek-v4-pro",
+    defaultFast: "deepseek-v4-flash",
   },
   qwen: {
     id: "qwen",
@@ -51,21 +67,31 @@ export const PROVIDERS: Record<ProviderId, ProviderPreset> = {
     tier: "cloud",
     // Modo OpenAI-compatible de DashScope (internacional).
     root: "https://dashscope-intl.aliyuncs.com/compatible-mode",
-    curatedModels: ["qwen-max", "qwen-plus", "qwen-turbo", "qwen3-coder-plus"],
+    // `qwen-max`/`qwen-plus`/`qwen-flash` son alias "float": apuntan SIEMPRE al último de su gama
+    // (mantenimiento casi cero). `qwen3.7-max` fija el flagship actual (agente/código) si se quiere pin.
+    curatedModels: ["qwen-max", "qwen3.7-max", "qwen-plus", "qwen-flash", "qwen3-coder-plus"],
+    defaultMain: "qwen-max",
+    defaultFast: "qwen-flash",
   },
   kimi: {
     id: "kimi",
     label: "Kimi",
     tier: "cloud",
     root: "https://api.moonshot.ai",
-    curatedModels: ["kimi-k2-0905-preview", "moonshot-v1-8k", "moonshot-v1-32k"],
+    // La serie `kimi-k2-*-preview` se discontinuó el 2026-05-25 y `kimi-latest` ya no se mantiene.
+    curatedModels: ["kimi-k2.7-code", "kimi-k2.6", "moonshot-v1-128k"],
+    defaultMain: "kimi-k2.7-code",
+    defaultFast: "kimi-k2.6",
   },
   groq: {
     id: "groq",
     label: "Groq",
     tier: "cloud",
     root: "https://api.groq.com/openai",
-    curatedModels: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+    // Groq anunció la deprecación de los Llama 3.x (jun-2026); recomienda los GPT-OSS (con tool use).
+    curatedModels: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile"],
+    defaultMain: "openai/gpt-oss-120b",
+    defaultFast: "openai/gpt-oss-20b",
   },
   openrouter: {
     id: "openrouter",

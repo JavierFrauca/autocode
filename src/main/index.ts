@@ -1,9 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
 import path from "node:path";
 import { startServer } from "./server";
-import { stopQdrant } from "./qdrant/launcher";
 import { stopAllPreviews } from "./routes/preview";
 import { setupAutoUpdater } from "./updater";
+import { maybeIndexNucleusOnStartup } from "./nucleus/startup";
 
 const isDev = !app.isPackaged;
 
@@ -36,10 +36,7 @@ app.whenReady().then(async () => {
 
   process.env.AUTOCODE_DB_PATH ??= path.join(userData, "autocode.db");
   process.env.AUTOCODE_LOG_DIR ??= path.join(userData, "logs");
-  process.env.AUTOCODE_QDRANT_DIR ??= path.join(userData, "qdrant");
-  // Modelo de embeddings local (bge-m3 ONNX): se descarga aquí la primera vez, como el binario de Qdrant.
-  process.env.AUTOCODE_MODELS_DIR ??= path.join(userData, "models");
-  process.env.QDRANT_URL ??= "http://127.0.0.1:6333";
+  // El índice RAG (Nucleus) y su modelo de embeddings viven en C:\ProgramData\AutoCode (ver nucleus/paths).
   process.env.API_PORT ??= "4317";
   process.env.API_HOST ??= "127.0.0.1";
 
@@ -55,6 +52,15 @@ app.whenReady().then(async () => {
 
   // Auto-actualización: comprueba GitHub Releases, descarga la versión nueva y la instala (con aviso).
   setupAutoUpdater(win);
+
+  // Indexado RAG con Nucleus: si su BBDD (C:\ProgramData\AutoCode) está vacía, indexa en diferido todo
+  // el contenido de los desarrollos. Va en un worker → no congela la UI. Se retrasa para no competir con
+  // el arranque (servidor + ventana). Best-effort: si falla, no afecta al resto de la app.
+  setTimeout(() => {
+    maybeIndexNucleusOnStartup().catch((e) =>
+      console.warn("[nucleus] indexado de arranque falló:", e),
+    );
+  }, 5000);
 
   ipcMain.handle("autocode:select-folder", async () => {
     const r = await dialog.showOpenDialog(win, { properties: ["openDirectory", "createDirectory"] });
@@ -75,7 +81,6 @@ app.on("before-quit", () => {
 
 app.on("window-all-closed", () => {
   stopAllPreviews();
-  stopQdrant();
   if (process.platform !== "darwin") app.quit();
 });
 

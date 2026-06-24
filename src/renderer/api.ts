@@ -24,6 +24,8 @@ export const api = {
   saveConfig: (cfg: any) => req<any>("/api/config", { method: "PUT", body: JSON.stringify(cfg) }),
   verifyConfig: () => req<any>("/api/config/verify", { method: "POST", body: JSON.stringify({}) }),
   availableModels: () => req<{ models: string[] }>("/api/config/models"),
+  // Catálogo de proveedores con sus modelos preseleccionados (config curada).
+  providers: () => req<{ providers: { id: string; label: string; tier: "cloud" | "local"; defaultMain: string; defaultFast: string; hasDefaults: boolean }[] }>("/api/config/providers"),
   projects: () => req<any[]>("/api/projects"),
   createProject: (name: string, description?: string) =>
     req<any>("/api/projects", { method: "POST", body: JSON.stringify({ name, description }) }),
@@ -78,9 +80,18 @@ export const api = {
   getScreenMockup: (projectId: string, path: string) =>
     req<{ exists: boolean; html: string | null; stale: boolean; generatedAt: string | null }>(
       `/api/projects/${projectId}/screens/mockup?path=${encodeURIComponent(path)}`),
-  generateScreenMockup: (projectId: string, path: string) =>
+  // Con `instruction` ("modificar con IA") el boceto actual se modifica según lo que pida el usuario.
+  generateScreenMockup: (projectId: string, path: string, instruction?: string) =>
     req<{ ok: boolean; html: string | null }>(
-      `/api/projects/${projectId}/screens/mockup`, { method: "POST", body: JSON.stringify({ path }) }),
+      `/api/projects/${projectId}/screens/mockup`, { method: "POST", body: JSON.stringify({ path, instruction }) }),
+  // "Modificar con IA" coherente: aplica el cambio al spec (.md) y regenera la maqueta. Devuelve ambos.
+  modifyScreen: (projectId: string, path: string, instruction: string) =>
+    req<{ ok: boolean; spec: string | null; html: string | null }>(
+      `/api/projects/${projectId}/screens/modify`, { method: "POST", body: JSON.stringify({ path, instruction }) }),
+  // Todas las pantallas con su maqueta (para la galería viva).
+  listScreens: (projectId: string) =>
+    req<{ screens: { path: string; name: string; mockupExists: boolean; stale: boolean; html: string | null }[] }>(
+      `/api/projects/${projectId}/screens`),
 
   // Prompts API
   listPrompts: () => req<{ prompts: { name: string; isCustom: boolean }[] }>("/api/prompts"),

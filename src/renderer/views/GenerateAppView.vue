@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../api";
 import { useAppStore } from "../stores";
-import { Rocket, Globe, Monitor, Plug, Webhook, RefreshCw, Sparkles, Circle, Hammer, X, Wrench, CheckCircle2, Play, Package, FolderOpen, Loader2, AlertTriangle, FlaskConical, Copy, Check } from "lucide-vue-next";
+import { Rocket, Globe, Monitor, Plug, Webhook, RefreshCw, Sparkles, Circle, Hammer, X, Wrench, CheckCircle2, Play, Loader2, AlertTriangle } from "lucide-vue-next";
 import type { AppType } from "@shared";
 import ExecutionTunnel from "../components/ExecutionTunnel.vue";
 import SplitButton, { type SplitItem } from "../components/SplitButton.vue";
@@ -199,65 +199,11 @@ async function validateVersion() {
     validating.value = false;
   }
 }
-// "Crear las pruebas ahora" (voluntario, antes de validar): escribe las pruebas de aceptación sin
-// esperar al "OK". Por defecto las pruebas se crean tras validar; esto es solo para adelantarlas.
-const writingTests = ref(false);
-async function writeTestsNow() {
-  if (writingTests.value) return;
-  writingTests.value = true;
-  error.value = null;
-  try {
-    await api.writeTests(projectId.value);
-    await loadExecution();
-    startExecPoll();
-  } catch (e: any) {
-    error.value = e?.message ?? String(e);
-  } finally {
-    writingTests.value = false;
-  }
-}
-// Reset del flag cuando arranca una nueva construcción.
+// Las pruebas de aceptación se crean SOLAS en segundo plano al validar; ya no hay botón manual.
+// Reset del flag "validada" cuando arranca una nueva construcción.
 watch(executing, (v) => { if (v) validated.value = false; });
 
-// "Probar la aplicación" (web): AutoCode instala, construye y arranca la app con SQLite y abre el
-// navegador. El usuario la USA para validarla, sin tocar consola.
-const previewStarting = ref(false);
-const previewUrl = ref<string | null>(null);
-// Apps web = login obligatorio → credenciales del admin sembrado. Servicio API → la API key sembrada.
-const previewCreds = ref<{ email: string; password: string } | null>(null);
-const previewApiKey = ref<string | null>(null);
-// Copiar al portapapeles (para que el usuario NO teclee la clave a mano y falle). `copied` marca qué campo
-// se acaba de copiar para dar feedback breve.
-const copied = ref<string | null>(null);
-async function copyText(value: string, field: string) {
-  try {
-    await navigator.clipboard.writeText(value);
-    copied.value = field;
-    setTimeout(() => { if (copied.value === field) copied.value = null; }, 1500);
-  } catch { /* sin portapapeles: el valor sigue visible para copiarlo a mano */ }
-}
-async function startPreview() {
-  if (previewStarting.value) return;
-  previewStarting.value = true;
-  error.value = null;
-  try {
-    const r = await api.previewStart(projectId.value);
-    previewUrl.value = r.url;
-    previewCreds.value = r.credenciales ?? null;
-    previewApiKey.value = r.apiKey ?? null;
-  } catch (e: any) {
-    error.value = `No se pudo arrancar: ${e?.message ?? e}`;
-  } finally {
-    previewStarting.value = false;
-  }
-}
-async function stopPreview() {
-  try { await api.previewStop(projectId.value); } catch {}
-  previewUrl.value = null;
-  previewCreds.value = null;
-  previewApiKey.value = null;
-}
-watch(executing, (v) => { if (v) { previewUrl.value = null; previewCreds.value = null; previewApiKey.value = null; } });
+// Probar la app y ver sus credenciales vive ahora en la pestaña "Ejecutar" (VersionsView), no aquí.
 
 async function cancelBuild() {
   try { await api.cancelExecution(projectId.value); } catch (e: any) { error.value = e?.message ?? String(e); }
@@ -289,69 +235,7 @@ function startExecPoll() {
   }, 2000);
 }
 
-// ── Distribución (solo apps de escritorio) ─────────────────────────────────────────────────────
-// Empaquetar para distribuir: escritorio → instalador .exe; cliente/servidor → paquete de despliegue
-// (.zip con Dockerfile + docker-compose para el sysop). El botón y los textos se adaptan al tipo.
-const packageState = ref<"none" | "running" | "done" | "failed">("none");
-const installerPath = ref<string | null>(null);
-const packageError = ref<string | null>(null);
-let pkgTimer: any = null;
-
-// "Distribuir" aplica a escritorio (instalador) y a web/servicio API (paquete de despliegue); no a MCP.
-const canPackage = computed(() => appType.value === "electron" || appType.value === "server" || appType.value === "api");
-const pkgLabels = computed(() =>
-  appType.value === "electron"
-    ? {
-        action: "Preparar para distribuir", retry: "Reintentar instalador", running: "Preparando el instalador…",
-        reveal: "Abrir carpeta del instalador",
-        title: "Genera un instalador (.exe) para repartir la app a quien no sabe compilar",
-        noteRunning: "Preparando el instalador… puede tardar unos minutos (la primera vez descarga componentes de Electron). Puedes seguir trabajando.",
-        noteOk: "✅ Instalador listo. Pulsa «Abrir carpeta del instalador» para copiar el .exe y repartirlo — quien lo reciba lo instala con doble clic.",
-      }
-    : {
-        action: "Generar paquete de despliegue", retry: "Reintentar paquete", running: "Generando el paquete…",
-        reveal: "Abrir carpeta del paquete",
-        title: "Genera un .zip (Dockerfile + docker-compose) para que tu equipo de IT lo despliegue",
-        noteRunning: "Generando el paquete de despliegue…",
-        noteOk: "✅ Paquete listo. Pulsa «Abrir carpeta del paquete» para coger el .zip y pasárselo a tu equipo de IT — lo despliegan con «docker compose up».",
-      },
-);
-
-async function loadPackageStatus() {
-  try {
-    const s = await api.packageStatus(projectId.value);
-    packageState.value = s.state;
-    installerPath.value = s.installerPath ?? s.bundlePath ?? null;
-    packageError.value = s.error ?? null;
-  } catch { /* sin estado: deja lo que haya */ }
-}
-function startPkgPoll() {
-  clearInterval(pkgTimer);
-  pkgTimer = setInterval(async () => {
-    await loadPackageStatus();
-    if (packageState.value !== "running") clearInterval(pkgTimer);
-  }, 3000);
-}
-async function startPackage() {
-  if (packageState.value === "running") return;
-  packageError.value = null;
-  packageState.value = "running";
-  try { await api.packageApp(projectId.value); }
-  catch (e: any) { packageState.value = "failed"; packageError.value = e?.message ?? String(e); return; }
-  startPkgPoll();
-}
-async function cancelPackaging() {
-  try { await api.cancelPackage(projectId.value); } catch {}
-  await loadPackageStatus();
-}
-async function revealInstaller() {
-  try { await api.revealInstaller(projectId.value); }
-  catch (e: any) { packageError.value = e?.message ?? String(e); }
-}
-// Al empezar una nueva construcción, el instalador anterior deja de ser válido.
-watch(executing, (v) => {
-  if (v) { clearInterval(pkgTimer); packageState.value = "none"; installerPath.value = null; packageError.value = null; }
-});
+// La distribución (instalador .exe / paquete de despliegue) vive ahora en la pestaña "Ejecutar".
 
 // Cuando la generación del plan (en el store) termina, cargamos el plan o mostramos el error.
 watch(() => gen.value?.status, (s) => {
@@ -364,15 +248,13 @@ watch(generating, (g) => {
   clearInterval(runsTimer);
   if (g) { loadRuns(); runsTimer = setInterval(loadRuns, 2500); }
 }, { immediate: true });
-onBeforeUnmount(() => { clearInterval(runsTimer); clearInterval(execTimer); clearInterval(pkgTimer); });
+onBeforeUnmount(() => { clearInterval(runsTimer); clearInterval(execTimer); });
 
 function init() {
   loadArchitecture();
   loadPlan();
   loadRuns();
   loadExecution().then(() => { if (executing.value) startExecPoll(); });
-  // Estado de un instalador previo (sobrevive a navegar): si quedó uno en marcha, reanuda el sondeo.
-  loadPackageStatus().then(() => { if (packageState.value === "running") startPkgPoll(); });
 }
 onMounted(init);
 watch(projectId, init);
@@ -505,6 +387,14 @@ watch(projectId, init);
               <Hammer v-else :size="15" :stroke-width="2" />
             </template>
           </SplitButton>
+          <!-- "He validado la app": a la derecha de Corregir. Solo cuando hay una versión construida. -->
+          <button v-if="builtOk && !validated" class="gen-build-btn" style="margin-left:8px" @click="validateVersion" :disabled="validating"
+                  title="Da la app por válida → ajusta la documentación al código real. Las pruebas se crean solas en segundo plano.">
+            <CheckCircle2 :size="15" :stroke-width="2" /> {{ validating ? 'Validando…' : 'He validado la app' }}
+          </button>
+          <span v-else-if="builtOk && validated" class="validated-pill" style="margin-left:8px">
+            <CheckCircle2 :size="14" :stroke-width="2" /> Validada — ajustando documentación
+          </span>
         </div>
 
         <!-- Construcción en curso (el usuario se asomó al plan sin cancelar) → volver al túnel. -->
@@ -514,83 +404,18 @@ watch(projectId, init);
           <button class="btn ghost" style="margin-left:auto; gap:6px" @click="tunnelDismissed = false">Ver construcción →</button>
         </div>
 
-        <!-- Versión construida → acciones (probar, validar, pruebas, distribuir) VIVEN AQUÍ, en el plan. -->
+        <!-- Versión construida → se PRUEBA y se DISTRIBUYE en la pestaña Ejecutar. Aquí solo se valida
+             (botón arriba, junto a Corregir). -->
         <div v-else-if="builtOk" class="build-status done">
           <div class="build-status-head">
             <CheckCircle2 :size="18" :stroke-width="2.2" />
             <strong>Aplicación construida.</strong>
-            <span class="muted">Pruébala de principio a fin y, cuando la des por buena, valídala.</span>
+            <span class="muted">Pruébala en la pestaña <strong>Ejecutar</strong> y, cuando la des por buena, pulsa «He validado la app» aquí arriba.</span>
           </div>
           <div class="build-actions">
-            <!-- Probar (web y servicio API): arranca el servidor y abre el navegador -->
-            <template v-if="appType === 'server' || appType === 'api'">
-              <button v-if="!previewUrl" class="gen-build-btn" style="margin-left:0" @click="startPreview" :disabled="previewStarting"
-                      title="Arranca el servidor y lo abre en tu navegador para que lo pruebes (sin instalar nada)">
-                <Play :size="15" :stroke-width="2" /> {{ previewStarting ? 'Arrancando…' : (appType === 'api' ? 'Probar el servicio' : 'Probar la aplicación') }}
-              </button>
-              <template v-else>
-                <button class="gen-build-btn" style="margin-left:0" @click="startPreview"><Play :size="15" :stroke-width="2" /> Abrir de nuevo</button>
-                <button class="btn ghost stop-btn" style="gap:6px" @click="stopPreview"><X :size="15" :stroke-width="2" /> Parar</button>
-              </template>
-            </template>
-            <!-- He validado / Crear pruebas -->
-            <template v-if="!validated">
-              <button class="gen-build-btn" style="margin-left:0" @click="validateVersion" :disabled="validating"
-                      title="Da la app por válida → crea las pruebas de aceptación y ajusta toda la documentación (papers, reglas, README) al código real">
-                <CheckCircle2 :size="15" :stroke-width="2" /> {{ validating ? 'Ajustando documentación…' : 'He validado la app' }}
-              </button>
-              <button class="btn ghost" style="gap:6px" @click="writeTestsNow" :disabled="writingTests"
-                      title="Adelanta la escritura de las pruebas de aceptación (normalmente se crean al validar). Opcional.">
-                <FlaskConical :size="15" :stroke-width="2" /> {{ writingTests ? 'Creando pruebas…' : 'Crear las pruebas ahora' }}
-              </button>
-            </template>
-            <span v-else class="validated-pill">
-              <CheckCircle2 :size="14" :stroke-width="2" /> Ajustando la documentación — mira el chat
-            </span>
-            <!-- Distribución: escritorio (instalador .exe) y web (paquete de despliegue) -->
-            <template v-if="canPackage">
-              <button v-if="packageState === 'none' || packageState === 'failed'" class="gen-build-btn" style="margin-left:0" @click="startPackage"
-                      :title="pkgLabels.title">
-                <Package :size="15" :stroke-width="2" /> {{ packageState === 'failed' ? pkgLabels.retry : pkgLabels.action }}
-              </button>
-              <span v-else-if="packageState === 'running'" class="validated-pill">
-                <Loader2 class="spin" :size="14" :stroke-width="2" /> {{ pkgLabels.running }}
-              </span>
-              <button v-else-if="packageState === 'done'" class="gen-build-btn" style="margin-left:0" @click="revealInstaller">
-                <FolderOpen :size="15" :stroke-width="2" /> {{ pkgLabels.reveal }}
-              </button>
-              <button v-if="packageState === 'running'" class="btn ghost" style="gap:6px" @click="cancelPackaging">
-                <X :size="14" :stroke-width="2" /> Cancelar
-              </button>
-            </template>
-          </div>
-          <!-- Credenciales para entrar a probar la app web (lleva login) -->
-          <div v-if="previewUrl && previewCreds" class="preview-creds">
-            <strong>Para entrar a probar la app</strong> (lleva login):
-            usuario <code>{{ previewCreds.email }}</code>
-            <button class="copy-chip" :title="'Copiar usuario'" @click="copyText(previewCreds.email, 'email')">
-              <Check v-if="copied === 'email'" :size="12" :stroke-width="2.5" /><Copy v-else :size="12" :stroke-width="2" />
+            <button class="gen-build-btn" style="margin-left:0" @click="router.push(`/projects/${projectId}/versions`)">
+              <Play :size="15" :stroke-width="2" /> Probar en Ejecutar →
             </button>
-            · contraseña <code>{{ previewCreds.password }}</code>
-            <button class="copy-chip" :title="'Copiar contraseña'" @click="copyText(previewCreds.password, 'pass')">
-              <Check v-if="copied === 'pass'" :size="12" :stroke-width="2.5" /><Copy v-else :size="12" :stroke-width="2" />
-            </button>
-            <span class="muted"> — clave de prueba fija; entra siempre. En la app real se gestionan los usuarios.</span>
-          </div>
-          <!-- API key para probar el servicio (se llama por API, no tiene interfaz) -->
-          <div v-if="previewUrl && previewApiKey" class="preview-creds">
-            <strong>Para llamar al servicio</strong> (cabecera <code>Authorization: Bearer …</code>):
-            API key <code>{{ previewApiKey }}</code>
-            <button class="copy-chip" :title="'Copiar API key'" @click="copyText(previewApiKey, 'apikey')">
-              <Check v-if="copied === 'apikey'" :size="12" :stroke-width="2.5" /><Copy v-else :size="12" :stroke-width="2" />
-            </button>
-            <span class="muted"> — clave de prueba para esta app; la página que se abre muestra los endpoints.</span>
-          </div>
-          <!-- Estado del empaquetado -->
-          <div v-if="canPackage && (packageState !== 'none' || packageError)" class="pkg-note">
-            <span v-if="packageState === 'running'" class="muted">{{ pkgLabels.noteRunning }}</span>
-            <span v-else-if="packageState === 'done'" class="pkg-ok">{{ pkgLabels.noteOk }}</span>
-            <span v-else-if="packageError" class="exec-why">{{ packageError }}</span>
           </div>
         </div>
 

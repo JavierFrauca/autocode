@@ -6,8 +6,9 @@ import { renderMarkdown } from "../md";
 import { useDialog } from "../composables/useDialog";
 import {
   Folder, FolderOpen, FileText, Pencil, Trash2, Plus,
-  X as IconX, Search, ChevronRight, ChevronDown, Sparkles, RotateCcw, History,
+  X as IconX, Search, ChevronRight, ChevronDown, Sparkles, RotateCcw, History, LayoutGrid, Wand2,
 } from "lucide-vue-next";
+import ScreenGallery from "../components/ScreenGallery.vue";
 
 const route = useRoute();
 const projectId = computed(() => route.params.projectId as string);
@@ -63,6 +64,7 @@ async function openFile(path: string) {
   mockupHtml.value = null;
   mockupExists.value = false;
   mockupStale.value = false;
+  modifyMockOpen.value = false;
   const r = await api.getFileContent(projectId.value, path);
   content.value = r.content ?? "";
   originalContent.value = r.content ?? "";
@@ -258,6 +260,41 @@ function setViewMode(m: "spec" | "mockup") {
   if (m === "mockup" && !mockupExists.value && !mockupLoading.value) loadMockup();
 }
 
+// ── Modificar la maqueta con IA (sobre el boceto actual de ESTA pantalla) ──────
+const modifyMockOpen = ref(false);
+const modifyMockText = ref("");
+async function modifyMockupWithAi() {
+  const text = modifyMockText.value.trim();
+  if (!text || !selectedPath.value || mockupGenerating.value) return;
+  mockupGenerating.value = true;
+  saveMsg.value = null;
+  try {
+    // Aplica el cambio al SPEC y regenera la maqueta → mantiene coherentes especificación y boceto.
+    const r = await api.modifyScreen(projectId.value, selectedPath.value, text);
+    mockupHtml.value = r.html;
+    mockupExists.value = !!r.html;
+    mockupStale.value = false;
+    // Refresca también el spec en memoria (por si el usuario cambia a la vista Spec).
+    if (r.spec != null) { content.value = r.spec; originalContent.value = r.spec; }
+    modifyMockText.value = "";
+    modifyMockOpen.value = false;
+    saveMsg.value = "Aplicado ✓";
+    setTimeout(() => { if (saveMsg.value === "Aplicado ✓") saveMsg.value = null; }, 3000);
+  } catch (e: any) {
+    saveMsg.value = "Error: no se pudo modificar (" + (e?.message ?? e) + ")";
+  } finally {
+    mockupGenerating.value = false;
+  }
+}
+
+// ── Galería de pantallas ──────────────────────────────────────────────────────
+const galleryMode = ref(false);
+async function onGalleryOpen(path: string) {
+  galleryMode.value = false;
+  await openFile(path);
+  setViewMode("mockup");
+}
+
 // ── Historial de revisiones ───────────────────────────────────────────────────
 const showHistory = ref(false);
 const revisions = ref<any[]>([]);
@@ -334,6 +371,11 @@ watch(projectId, loadTree);
           <IconX :size="12" :stroke-width="2.5" />
         </button>
       </div>
+
+      <!-- Acceso a la galería viva de pantallas -->
+      <button class="gallery-toggle" :class="{ active: galleryMode }" @click="galleryMode = !galleryMode">
+        <LayoutGrid :size="13" :stroke-width="2" /> Galería de pantallas
+      </button>
 
       <!-- Formulario de nuevo documento -->
       <div v-if="showNewForm" class="new-doc-form">
@@ -418,7 +460,10 @@ watch(projectId, loadTree);
 
     <!-- ── Visor / editor ── -->
     <div class="docs-content">
-      <template v-if="selectedPath">
+      <!-- Galería viva de pantallas (rejilla de bocetos + modificar con IA) -->
+      <ScreenGallery v-if="galleryMode" :project-id="projectId" @open="onGalleryOpen" />
+
+      <template v-else-if="selectedPath">
         <div class="doc-toolbar">
           <div class="doc-breadcrumb">
             <span class="dim">{{ selectedPath.split('/').slice(0, -1).join(' / ') }}</span>
@@ -439,6 +484,9 @@ watch(projectId, loadTree);
           <template v-if="isScreen && viewMode === 'mockup'">
             <span class="mockup-tag">Boceto · no funcional</span>
             <span v-if="mockupStale && mockupExists" class="mockup-stale" title="El spec cambió desde que se generó">desactualizada</span>
+            <button v-if="mockupExists" class="btn ghost" style="gap:5px" :class="{ 'btn-active': modifyMockOpen }" :disabled="mockupGenerating" @click="modifyMockOpen = !modifyMockOpen">
+              <Wand2 :size="13" :stroke-width="2" /> Modificar con IA
+            </button>
             <button class="btn ghost" style="gap:5px" :disabled="mockupGenerating" @click="regenerateMockup">
               <Sparkles :size="13" :stroke-width="2" />
               {{ mockupGenerating ? "Generando…" : (mockupExists ? "Regenerar" : "Generar") }}
@@ -459,6 +507,24 @@ watch(projectId, loadTree);
               {{ saving ? "Guardando…" : "Guardar" }}
             </button>
           </template>
+        </div>
+
+        <!-- Barra de "Modificar con IA": cambia el boceto actual de esta pantalla según lo que pidas -->
+        <div v-if="isScreen && viewMode === 'mockup' && modifyMockOpen" class="mock-modify-bar">
+          <Wand2 :size="15" :stroke-width="2" class="mock-modify-ico" />
+          <input
+            v-model="modifyMockText"
+            class="mock-modify-input"
+            placeholder="Dile qué cambiar: sube el botón Guardar arriba · quita la columna de fecha · más espacio entre tarjetas…"
+            :disabled="mockupGenerating"
+            @keydown.enter="modifyMockupWithAi"
+            @keydown.escape="modifyMockOpen = false"
+            autofocus
+          />
+          <button class="btn primary" style="gap:5px" :disabled="mockupGenerating || !modifyMockText.trim()" @click="modifyMockupWithAi">
+            <Wand2 :size="13" :stroke-width="2" /> {{ mockupGenerating ? "Aplicando…" : "Aplicar" }}
+          </button>
+          <button class="btn ghost" :disabled="mockupGenerating" @click="modifyMockOpen = false">Cancelar</button>
         </div>
 
         <div class="doc-body">
@@ -613,6 +679,17 @@ watch(projectId, loadTree);
   flex-shrink: 0;
 }
 .docs-search-clear:hover { color: var(--text); background: var(--bg-hover); }
+
+/* ── Acceso a la galería ── */
+.gallery-toggle {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 8px 12px; border: none; border-bottom: 1px solid var(--border-dim);
+  background: transparent; color: var(--text-muted); font-size: 12.5px; font-weight: 600;
+  font-family: inherit; cursor: pointer; text-align: left;
+}
+.gallery-toggle:hover { background: var(--bg-hover); color: var(--text); }
+.gallery-toggle.active { background: var(--accent-bg); color: var(--accent); }
+.gallery-toggle svg { flex-shrink: 0; }
 
 /* ── Resultados semánticos ── */
 .semantic-header {
@@ -791,6 +868,20 @@ watch(projectId, loadTree);
   color: var(--text-dim);
   font-weight: 600;
   letter-spacing: .02em;
+}
+
+/* Barra "Modificar con IA" sobre la maqueta */
+.mock-modify-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 18px; border-bottom: 1px solid var(--border);
+  background: var(--accent-bg, color-mix(in srgb, var(--accent) 8%, var(--bg-surface)));
+  flex-shrink: 0;
+}
+.mock-modify-ico { color: var(--accent); flex-shrink: 0; }
+.mock-modify-input {
+  flex: 1; min-width: 0; font-family: inherit; font-size: 13px;
+  padding: 7px 10px; border: 1px solid var(--accent); border-radius: var(--r-sm);
+  background: var(--bg); color: var(--text); outline: none;
 }
 .mockup-stale {
   font-size: 10px;

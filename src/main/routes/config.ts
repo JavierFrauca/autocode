@@ -1,9 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { type AppConfig, EMBEDDINGS_DIM, EMBEDDINGS_MODEL } from "@shared";
+import { type AppConfig } from "@shared";
 import { loadConfig, saveConfig } from "../config.js";
-import { embed, probeToolCalling } from "../llm/client.js";
-import { PROVIDERS, resolveBaseUrl } from "../llm/providers.js";
+import { probeToolCalling } from "../llm/client.js";
+import { PROVIDERS, PROVIDER_LIST, resolveBaseUrl } from "../llm/providers.js";
 
 const Schema = z.object({
   generation: z.object({
@@ -72,6 +72,20 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
     return { ok: true };
   });
 
+  // Catálogo de proveedores para la UI: el flujo normal solo pinta el chip + usa los modelos
+  // preseleccionados. `hasDefaults` indica si el proveedor trae modelos por defecto (los que no, como
+  // OpenRouter, obligan a teclearlos en "Avanzado").
+  app.get("/api/config/providers", async () => ({
+    providers: PROVIDER_LIST.map((p) => ({
+      id: p.id,
+      label: p.label,
+      tier: p.tier,
+      defaultMain: p.defaultMain ?? "",
+      defaultFast: p.defaultFast ?? "",
+      hasDefaults: !!p.defaultMain && !!p.defaultFast,
+    })),
+  }));
+
   // Lista de modelos del proveedor en vivo (`/v1/models`). Si no responde, cae a la lista curada del
   // preset para que el desplegable no quede vacío. El usuario siempre puede teclear un modelo a mano.
   app.get("/api/config/models", async () => {
@@ -137,39 +151,14 @@ export async function registerConfigRoutes(app: FastifyInstance): Promise<void> 
       };
     };
 
-    // 4) Embeddings: llamada real al embedder LOCAL (verifica dimensión). La 1ª vez descarga el modelo.
-    const pingEmbeddings = async () => {
-      const start = Date.now();
-      try {
-        const vs = await withTimeout(embed(cfg, ["ping"], "verify"), 120_000);
-        const dim = vs[0]?.length ?? 0;
-        return {
-          ok: dim === EMBEDDINGS_DIM,
-          model: `${EMBEDDINGS_MODEL} (local)`,
-          dim,
-          expectedDim: EMBEDDINGS_DIM,
-          responseMs: Date.now() - start,
-          error: dim === 0 ? "respuesta vacía" : dim !== EMBEDDINGS_DIM ? `dim recibido ${dim}, esperado ${EMBEDDINGS_DIM}` : undefined,
-        };
-      } catch (e: any) {
-        return {
-          ok: false,
-          model: `${EMBEDDINGS_MODEL} (local)`,
-          expectedDim: EMBEDDINGS_DIM,
-          error: String(e?.message ?? e).slice(0, 240),
-          responseMs: Date.now() - start,
-        };
-      }
-    };
-
-    const [tools, embeddings] = await Promise.all([toolsProbe(), pingEmbeddings()]);
+    // Los embeddings ya no se verifican aquí: viven dentro de Nucleus (se cargan al primer indexado).
+    const tools = await toolsProbe();
 
     return {
       provider,
       main: checkModel(cfg.generation.mainModel),
       fast: checkModel(cfg.generation.fastModel),
       tools,
-      embeddings,
     };
   });
 }

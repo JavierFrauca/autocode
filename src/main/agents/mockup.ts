@@ -131,23 +131,39 @@ export function paletteBlock(appType: AppType): string {
   ].join("\n");
 }
 
-/** Genera el HTML de la maqueta desde la prosa del spec (sin tocar disco). */
+/**
+ * Genera el HTML de la maqueta desde la prosa del spec (sin tocar disco).
+ * Si `tweak` viene, MODIFICA el boceto actual según la instrucción del usuario ("sube el botón",
+ * "quita la columna de fecha"…) conservando el resto del diseño, en vez de rehacerlo desde el spec.
+ */
 export async function generateMockupHtml(
   cfg: AppConfig,
   spec: string,
   appType: AppType = "electron",
   deps: MockupDeps = {},
+  tweak?: { instruction: string; currentHtml?: string },
 ): Promise<string> {
   const chatFn = deps.chatFn ?? (chat as MockupChatFn);
   const system = deps.systemPrompt ?? (await loadPrompt("mockup-system"));
   const messages: ChatMessage[] = [
     { role: "system", content: system },
     { role: "system", content: paletteBlock(appType) },
-    {
+  ];
+  if (tweak?.instruction) {
+    messages.push({
+      role: "user",
+      content:
+        `Especificación de la pantalla (Markdown):\n\n${spec}\n\n` +
+        (tweak.currentHtml ? `Boceto ACTUAL (HTML):\n\n${tweak.currentHtml}\n\n` : "") +
+        `Aplica este cambio que pide el usuario, conservando el resto del diseño y la paleta:\n` +
+        `"${tweak.instruction}"\n\nDevuelve SOLO el HTML del boceto ya modificado.`,
+    });
+  } else {
+    messages.push({
       role: "user",
       content: `Especificación de la pantalla (Markdown):\n\n${spec}\n\nDevuelve SOLO el HTML del boceto.`,
-    },
-  ];
+    });
+  }
   const res = await chatFn(cfg, "docs", messages, { temperature: 0.3, maxTokens: MOCKUP_MAX_TOKENS }, "mockup");
   return stripHtmlFences(res.content);
 }
@@ -166,7 +182,7 @@ export async function ensureMockupForScreen(
   cfg: AppConfig,
   projectId: string,
   relPath: string,
-  opts: { force?: boolean; appType?: AppType } = {},
+  opts: { force?: boolean; appType?: AppType; instruction?: string } = {},
   deps: MockupDeps = {},
 ): Promise<EnsureMockupResult> {
   if (!isScreenDoc(relPath)) return { status: "not-screen" };
@@ -182,7 +198,10 @@ export async function ensureMockupForScreen(
   const rootNorm = path.resolve(rootPath).toLowerCase();
   if (!htmlAbs.toLowerCase().startsWith(rootNorm)) return { status: "not-screen" };
 
-  if (!opts.force) {
+  // Una instrucción ("modificar con IA") implica regenerar siempre sobre el boceto actual.
+  const force = opts.force || !!opts.instruction;
+
+  if (!force) {
     try {
       await fs.access(htmlAbs);
       return { status: "skipped", path: htmlRel }; // ya existe → no regenerar en auto
@@ -195,14 +214,19 @@ export async function ensureMockupForScreen(
   } catch {
     return { status: "not-screen" }; // el .md no existe (p.ej. borrado): nada que maquetar
   }
-  if (!opts.force && !hasSubstantialSpec(spec)) {
+  if (!force && !hasSubstantialSpec(spec)) {
     return { status: "skipped", path: htmlRel }; // stub vacío: no malgastar LLM
   }
   if (!spec.trim()) return { status: "not-screen" };
 
+  // Para modificar, partimos del boceto actual (si existe) y le aplicamos el cambio pedido.
+  const tweak = opts.instruction
+    ? { instruction: opts.instruction, currentHtml: await fs.readFile(htmlAbs, "utf-8").catch(() => undefined) }
+    : undefined;
+
   let html: string;
   try {
-    html = await generateMockupHtml(cfg, spec, opts.appType ?? "electron", deps);
+    html = await generateMockupHtml(cfg, spec, opts.appType ?? "electron", deps, tweak);
   } catch (e) {
     log.warn("mockup", "fallo generando la maqueta", { err: e, ruta: relPath });
     return { status: "skipped", path: htmlRel };

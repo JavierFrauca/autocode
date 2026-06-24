@@ -212,6 +212,19 @@ async function send() {
   }
 }
 
+// Ejemplos para arrancar: un clic los envía. Desbloquean a quien se queda en blanco ante el chat.
+const EXAMPLES = [
+  "Tengo una clínica y quiero gestionar las citas de los pacientes",
+  "Quiero una app para llevar el inventario y las ventas de mi tienda",
+  "Necesito controlar pedidos, clientes y albaranes de mi empresa",
+  "Una herramienta para reservar salas y material de la oficina",
+];
+async function sendExample(text: string) {
+  if (sending.value) return;
+  input.value = text;
+  await send();
+}
+
 function goToDocs() {
   router.push(`/projects/${projectId.value}/docs`);
 }
@@ -398,6 +411,12 @@ watch(projectId, loadSessions);
           <img :src="app.theme === 'dark' ? logoDark : logoLight" class="chat-empty-logo" alt="" />
           <h3>Cuéntame qué quieres construir</h3>
           <p class="muted">Describe tu negocio, una pantalla o una regla. La IA irá generando los documentos del proyecto automáticamente.</p>
+          <div class="chat-examples">
+            <span class="chat-examples-label">¿No sabes por dónde empezar? Pulsa un ejemplo:</span>
+            <button v-for="ex in EXAMPLES" :key="ex" class="example-chip" :disabled="sending" @click="sendExample(ex)">
+              {{ ex }}
+            </button>
+          </div>
         </div>
 
         <!-- Mensajes -->
@@ -713,6 +732,19 @@ watch(projectId, loadSessions);
 }
 .chat-empty h3 { font-size: 17px; color: var(--text); margin: 0; }
 .chat-empty p  { font-size: 14px; line-height: 1.65; }
+
+/* Ejemplos clicables para arrancar */
+.chat-examples { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; width: 100%; }
+.chat-examples-label { font-size: 12.5px; color: var(--text-dim); margin-bottom: 2px; }
+.example-chip {
+  text-align: left; font-family: inherit; font-size: 13px; line-height: 1.4;
+  padding: 11px 14px; border: 1px solid var(--border); border-radius: var(--r);
+  background: var(--bg); color: var(--text); cursor: pointer;
+  transition: border-color .12s, background .12s, transform .08s;
+}
+.example-chip:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg); color: var(--accent); }
+.example-chip:active:not(:disabled) { transform: translateY(1px); }
+.example-chip:disabled { opacity: .55; cursor: default; }
 
 /* Asegura que los mensajes queden sobre el fondo */
 .msgs { position: relative; z-index: 1; }

@@ -1,11 +1,8 @@
 import OpenAI from "openai";
 import type { AppConfig, ModelRole } from "@shared";
-import { EMBEDDINGS_MODEL } from "@shared";
 import { resolveBaseUrl } from "./providers.js";
-import { embedTexts } from "./local-embeddings.js";
 import { startCall } from "./activity.js";
 import { llmContext } from "./context.js";
-import { EmbedBusyError, Mutex } from "./queue.js";
 import { thinkingParams, type ThinkingOption } from "./thinking.js";
 import { log } from "../log.js";
 
@@ -225,56 +222,8 @@ export async function runToolLoop(
   return { messages, toolsUsed, supported: true };
 }
 
-// ── Cola de embeddings ────────────────────────────────────────────────────────────────────
-// Los embeddings corren AHORA en proceso (bge-m3 vía ONNX, ./local-embeddings.ts): sin red, sin
-// proveedor. La inferencia en CPU conviene serializarla (varias a la vez solo compiten por la CPU),
-// así que mantenemos el mutex: un embedding cada vez. Las llamadas INTERACTIVAS (búsqueda del chat)
-// ceden el turno si la cola está ocupada, para no bloquear la conversación tras un `ingest` largo;
-// el resto (ingest, índices) esperan. El Mutex vive en ./queue.js (con sus tests).
-const embedMutex = new Mutex();
-const EMBED_QUEUE_WAIT_MS = Number(process.env.AUTOCODE_EMBED_QUEUE_WAIT_MS) || 10_000;
-// Cuántos embeddings PESADOS (ingest, índices, reindex) hay en marcha. Si hay alguno, el auto-RAG
-// del chat (interactivo) se salta directamente: la CPU está ocupada, mejor responder sin contexto
-// que competir y enlentecerlo todo.
-let backgroundEmbedsInFlight = 0;
-
-export async function embed(
-  cfg: AppConfig,
-  texts: string[],
-  source: string = "embeddings",
-  opts: { interactive?: boolean } = {},
-): Promise<number[][]> {
-  if (texts.length === 0) return [];
-  const interactive = !!opts.interactive;
-
-  // Pausa del auto-RAG: si hay un ingest/indexado pesado en curso, la búsqueda del chat se salta
-  // (EmbedBusyError → el llamante responde sin contexto) en vez de meterse en la cola.
-  if (interactive && backgroundEmbedsInFlight > 0) throw new EmbedBusyError();
-
-  void cfg; // la config ya no elige proveedor de embeddings: van siempre locales.
-  const model = `${EMBEDDINGS_MODEL} (local)`;
-  const ctx = llmContext.getStore();
-
-  if (!interactive) backgroundEmbedsInFlight++;
-  try {
-    // Esperar turno ANTES de marcar "running" → el panel muestra como mucho 1 embedding en proceso.
-    const release = await embedMutex.acquire(interactive ? EMBED_QUEUE_WAIT_MS : undefined);
-    const tracker = startCall({ model, role: "embeddings", source, agentRunId: ctx?.agentRunId ?? null });
-    try {
-      const vectors = await embedTexts(texts);
-      tracker.done({ tokensIn: 0 });
-      return vectors;
-    } catch (e: any) {
-      const msg = String(e?.message ?? e);
-      tracker.fail(msg);
-      throw new Error(msg);
-    } finally {
-      release();
-    }
-  } finally {
-    if (!interactive) backgroundEmbedsInFlight--;
-  }
-}
+// Los embeddings YA NO viven aquí: los hace Nucleus en su worker (ver src/main/nucleus/*). AutoCode
+// ya no embebe en este proceso ni habla con un proveedor de embeddings.
 
 export async function pingProvider(cfg: AppConfig): Promise<boolean> {
   const base = resolveBaseUrl(cfg).replace(/\/$/, "");

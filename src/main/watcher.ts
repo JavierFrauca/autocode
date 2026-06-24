@@ -5,7 +5,8 @@ import { and, eq, isNull } from "drizzle-orm";
 import { db, schema } from "./db/client.js";
 import { loadConfig } from "./config.js";
 import { ingestRevision, isDocPath } from "./papers/ingest.js";
-import { QdrantClient } from "./qdrant/client.js";
+import { nucleusDeleteDoc } from "./nucleus/client.js";
+import { projectDomain } from "./nucleus/domains.js";
 import { ulid } from "ulid";
 
 const DEBOUNCE_MS = 800;
@@ -38,7 +39,7 @@ async function handleChange(event: string, filePath: string, project: { id: stri
 
     if (!stat || event === "rename" && !stat) {
       // File deleted
-      await removeFileFromQdrant(cfg, project.id, project.qdrantCollection, relPath);
+      await removeFile(project.id, relPath);
       return;
     }
 
@@ -74,19 +75,16 @@ async function handleChange(event: string, filePath: string, project: { id: stri
   }
 }
 
-async function removeFileFromQdrant(cfg: any, projectId: string, collection: string, relPath: string): Promise<void> {
-  const qdrant = new QdrantClient(cfg.qdrantUrl);
+async function removeFile(projectId: string, relPath: string): Promise<void> {
   const existing = await db().select().from(schema.documents)
     .where(and(eq(schema.documents.projectId, projectId), eq(schema.documents.path, relPath)));
   if (!existing[0]) return;
   const docId = existing[0].id;
-  await qdrant.deleteByFilter(collection, { must: [{ key: "document_id", match: { value: docId } }] });
-  await db().delete(schema.embeddingsIndex)
-    .where(and(eq(schema.embeddingsIndex.projectId, projectId), eq(schema.embeddingsIndex.documentId, docId)));
+  try { await nucleusDeleteDoc(projectDomain(projectId), relPath); } catch { /* best-effort */ }
   await db().update(schema.documents)
     .set({ deletedAt: new Date().toISOString() })
     .where(eq(schema.documents.id, docId));
-  console.log(`[watcher] removed from Qdrant: ${relPath}`);
+  console.log(`[watcher] removido del índice: ${relPath}`);
 }
 
 function extractTitle(content: string, fallbackPath: string): string {

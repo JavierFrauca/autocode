@@ -4,10 +4,8 @@ import { desc, eq, isNull } from "drizzle-orm";
 import { app as electronApp } from "electron";
 import type { AppConfig } from "@shared";
 import { db, schema } from "../db/client.js";
-import { loadConfig } from "../config.js";
-import { QdrantClient } from "../qdrant/client.js";
-import { LIBRARY_COLLECTION, TEMPLATES_COLLECTION } from "../qdrant/collections.js";
-import { embed } from "../llm/client.js";
+import { nucleusSearch } from "../nucleus/client.js";
+import { projectDomain, KB_LIBRARY_DOMAIN, KB_TEMPLATES_DOMAIN } from "../nucleus/domains.js";
 import { safeResolve } from "../util/paths.js";
 
 /**
@@ -110,51 +108,40 @@ export interface SearchDocumentsResult {
 
 export async function searchDocuments(
   opts: { query: string; projectId?: string; topK?: number },
-  cfg?: AppConfig,
+  _cfg?: AppConfig,
 ): Promise<SearchDocumentsResult> {
-  const config = cfg ?? (await loadConfig());
-  // Embeddings locales siempre disponibles (sin gate de configuración de usuario).
-
-  let vector: number[] | undefined;
-  try {
-    vector = (await embed(config, [opts.query], "knowledge-search", { interactive: true }))[0];
-  } catch (e: any) {
-    return { ok: false, error: `error generando embedding: ${e?.message ?? e}`, hits: [] };
-  }
-  if (!vector) return { ok: false, error: "embedding vacío", hits: [] };
-
-  let collections: string[];
+  // Un dominio de Nucleus por proyecto. Sin proyecto → busca en todos los activos.
+  let projectIds: string[];
   if (opts.projectId) {
     const p = (
-      await db()
-        .select({ c: schema.projects.qdrantCollection })
-        .from(schema.projects)
-        .where(eq(schema.projects.id, opts.projectId))
-        .limit(1)
+      await db().select({ id: schema.projects.id }).from(schema.projects)
+        .where(eq(schema.projects.id, opts.projectId)).limit(1)
     )[0];
     if (!p) return { ok: false, error: `proyecto ${opts.projectId} no encontrado`, hits: [] };
-    collections = [p.c];
+    projectIds = [p.id];
   } else {
-    const projects = await db()
-      .select({ c: schema.projects.qdrantCollection })
-      .from(schema.projects)
+    const projects = await db().select({ id: schema.projects.id }).from(schema.projects)
       .where(isNull(schema.projects.deletedAt));
-    collections = projects.map((p) => p.c);
+    projectIds = projects.map((p) => p.id);
   }
-  if (collections.length === 0) return { ok: true, hits: [] };
+  if (projectIds.length === 0) return { ok: true, hits: [] };
 
-  const qdrant = new QdrantClient(config.qdrantUrl);
-  const hits = await qdrant.searchMulti(collections, vector, opts.topK ?? 5);
+  let raw;
+  try {
+    raw = await nucleusSearch(projectIds.map(projectDomain), opts.query, opts.topK ?? 5);
+  } catch (e: any) {
+    return { ok: false, error: `error de búsqueda: ${e?.message ?? e}`, hits: [] };
+  }
   return {
     ok: true,
-    hits: hits.map((h) => ({
+    hits: raw.map((h) => ({
       score: Math.round(h.score * 1000) / 1000,
-      title: (h.payload["title"] as string) ?? null,
-      path: (h.payload["path"] as string) ?? null,
-      heading: h.payload["heading_path"] ?? null,
-      text: (h.payload["text"] as string) ?? "",
-      documentId: (h.payload["document_id"] as string) ?? null,
-      projectId: (h.payload["project_id"] as string) ?? null,
+      title: h.metadata.title ?? null,
+      path: h.metadata.path ?? null,
+      heading: null,
+      text: h.text,
+      documentId: h.metadata.document_id ?? null,
+      projectId: h.metadata.project_id ?? null,
     })),
   };
 }
@@ -185,33 +172,27 @@ export interface SearchKbResult {
 
 export async function searchKnowledgeBase(
   opts: { query: string; source?: "library" | "templates" | "all"; topK?: number },
-  cfg?: AppConfig,
+  _cfg?: AppConfig,
 ): Promise<SearchKbResult> {
-  const config = cfg ?? (await loadConfig());
-  // Embeddings locales siempre disponibles (sin gate de configuración de usuario).
-  let vector: number[] | undefined;
-  try {
-    vector = (await embed(config, [opts.query], "knowledge-kb-search", { interactive: true }))[0];
-  } catch (e: any) {
-    return { ok: false, error: `error generando embedding: ${e?.message ?? e}`, hits: [] };
-  }
-  if (!vector) return { ok: false, error: "embedding vacío", hits: [] };
-
   const source = opts.source ?? "all";
-  const collections: string[] = [];
-  if (source === "library" || source === "all") collections.push(LIBRARY_COLLECTION);
-  if (source === "templates" || source === "all") collections.push(TEMPLATES_COLLECTION);
+  const domains: string[] = [];
+  if (source === "library" || source === "all") domains.push(KB_LIBRARY_DOMAIN);
+  if (source === "templates" || source === "all") domains.push(KB_TEMPLATES_DOMAIN);
 
-  const qdrant = new QdrantClient(config.qdrantUrl);
-  const hits = await qdrant.searchMulti(collections, vector, opts.topK ?? 5);
+  let raw;
+  try {
+    raw = await nucleusSearch(domains, opts.query, opts.topK ?? 5);
+  } catch (e: any) {
+    return { ok: false, error: `error de búsqueda: ${e?.message ?? e}`, hits: [] };
+  }
   return {
     ok: true,
-    hits: hits.map((h) => ({
+    hits: raw.map((h) => ({
       score: Math.round(h.score * 1000) / 1000,
-      source: (h.payload["collection_type"] as string) ?? "unknown",
-      filePath: (h.payload["file_path"] as string) ?? null,
-      heading: h.payload["heading_path"] ?? null,
-      text: (h.payload["text"] as string) ?? "",
+      source: h.metadata.collection_type ?? "unknown",
+      filePath: h.metadata.file_path ?? null,
+      heading: null,
+      text: h.text,
     })),
   };
 }

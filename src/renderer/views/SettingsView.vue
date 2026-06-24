@@ -24,15 +24,29 @@ const form = reactive({
   qdrantUrl: "http://127.0.0.1:6333",
 });
 
-const cloudProviders: { id: ProviderId; label: string }[] = [
-  { id: "anthropic", label: "Anthropic" },
-  { id: "openai", label: "OpenAI" },
-  { id: "deepseek", label: "DeepSeek" },
-  { id: "qwen", label: "Qwen" },
-  { id: "kimi", label: "Kimi" },
-  { id: "groq", label: "Groq" },
-  { id: "openrouter", label: "OpenRouter" },
-];
+type CloudPreset = { id: ProviderId; label: string; tier: "cloud" | "local"; defaultMain: string; defaultFast: string; hasDefaults: boolean };
+const cloudProviders = ref<CloudPreset[]>([]);
+const presetById = computed<Record<string, CloudPreset>>(
+  () => Object.fromEntries(cloudProviders.value.map((p) => [p.id, p])),
+);
+const currentPreset = computed(() => presetById.value[form.generation.provider]);
+const showAdvancedModels = ref(false);
+
+async function loadProviders() {
+  try {
+    const r = await api.providers();
+    cloudProviders.value = r.providers.filter((p) => p.tier === "cloud") as CloudPreset[];
+  } catch { /* sin catálogo: los chips quedan vacíos, no bloquea */ }
+}
+
+// El usuario normal NO elige modelo: al escoger proveedor, AutoCode usa sus modelos preseleccionados.
+// Si el proveedor no trae defaults (p.ej. OpenRouter), abrimos "Avanzado" para que los escriba a mano.
+function applyPresetModels(id: ProviderId) {
+  const p = presetById.value[id];
+  form.generation.mainModel = p?.defaultMain ?? "";
+  form.generation.fastModel = p?.defaultFast ?? "";
+  showAdvancedModels.value = !!p && !p.hasDefaults;
+}
 
 const apiKeySet = ref(false);
 const saving = ref(false);
@@ -57,12 +71,16 @@ const steps = [
 function setMode(mode: "cloud" | "local") {
   form.generation.mode = mode;
   if (mode === "local") form.generation.provider = "local";
-  else if (form.generation.provider === "local") form.generation.provider = "anthropic";
+  else {
+    if (form.generation.provider === "local") form.generation.provider = "anthropic";
+    applyPresetModels(form.generation.provider);
+  }
   models.value = [];
 }
 function selectProvider(id: ProviderId) {
   form.generation.provider = id;
   models.value = [];
+  applyPresetModels(id);
 }
 
 async function loadModels() {
@@ -157,7 +175,13 @@ const stepStatus = computed(() => ({
     : "pending",
 }));
 
-onMounted(load);
+onMounted(async () => {
+  await Promise.all([load(), loadProviders()]);
+  // Cloud sin modelos guardados (instalación nueva) → usa los preseleccionados del proveedor.
+  if (form.generation.mode === "cloud" && (!form.generation.mainModel || !form.generation.fastModel)) {
+    applyPresetModels(form.generation.provider);
+  }
+});
 </script>
 
 <template>
@@ -280,56 +304,86 @@ onMounted(load);
           </div>
         </template>
 
-        <!-- Conectar + traer modelos -->
-        <div class="connect-row">
-          <button class="btn primary" style="gap:6px" @click="connect" :disabled="connecting || !endpointReady">
-            <Plug :size="15" :stroke-width="2" /> {{ connecting ? "Conectando…" : "Conectar y traer modelos" }}
-          </button>
-          <button v-if="models.length" class="btn ghost" @click="loadModels" :disabled="modelsLoading" title="Recargar modelos">
-            <RefreshCw :size="14" :stroke-width="2" :class="{ 'spinning-slow': modelsLoading }" />
-          </button>
-          <span v-if="models.length" class="connected-pill"><CheckCheck :size="14" :stroke-width="2.5" /> {{ models.length }} modelos</span>
-        </div>
-        <div v-if="modelsError" class="models-error-banner">⚠ {{ modelsError }}</div>
-
-        <!-- Modelo principal -->
-        <div class="model-card">
-          <div class="model-card-icon"><Sparkles :size="22" :stroke-width="1.8" /></div>
-          <div class="model-card-body">
-            <strong class="model-card-title">Modelo principal</strong>
-            <p class="model-card-desc">Conversar, generar la app y documentar. El potente — debe soportar function-calling.</p>
-            <select v-if="models.length" v-model="form.generation.mainModel">
-              <option value="">— Selecciona un modelo —</option>
-              <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
-              <option v-if="form.generation.mainModel && !models.includes(form.generation.mainModel)" :value="form.generation.mainModel">{{ form.generation.mainModel }}</option>
-            </select>
-            <input v-else v-model="form.generation.mainModel" placeholder="Ej: claude-sonnet-4-6 · deepseek-chat" />
+        <!-- NUBE: modelos preseleccionados. El usuario no elige nada; pega su clave y listo. -->
+        <div v-if="form.generation.mode === 'cloud'" class="preset-block">
+          <div v-if="currentPreset?.hasDefaults" class="preset-line">
+            <Sparkles :size="16" :stroke-width="1.9" />
+            <span>Modelos ya elegidos para <strong>{{ currentPreset?.label }}</strong>. No tienes que tocar nada.</span>
           </div>
+          <div v-if="currentPreset?.hasDefaults" class="preset-chips">
+            <span class="preset-chip"><Sparkles :size="13" :stroke-width="2" /> {{ form.generation.mainModel }}</span>
+            <span class="preset-chip alt"><Zap :size="13" :stroke-width="2" /> {{ form.generation.fastModel }}</span>
+          </div>
+
+          <details class="adv" :open="showAdvancedModels">
+            <summary>Avanzado · usar otros modelos</summary>
+            <p v-if="!currentPreset?.hasDefaults" class="field-hint" style="margin:8px 0 0">
+              Este proveedor no trae modelos preseleccionados. Escribe cuáles usar.
+            </p>
+            <div class="field" style="margin-top:10px">
+              <label class="field-label">Modelo principal <span class="muted" style="font-weight:400">— debe soportar function-calling</span></label>
+              <input v-model="form.generation.mainModel" placeholder="Ej: claude-sonnet-4-6" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label class="field-label">Modelo rápido</label>
+              <input v-model="form.generation.fastModel" placeholder="Ej: claude-haiku-4-5" autocomplete="off" />
+            </div>
+          </details>
         </div>
 
-        <!-- Modelo rápido -->
-        <div class="model-card">
-          <div class="model-card-icon"><Zap :size="22" :stroke-width="1.8" /></div>
-          <div class="model-card-body">
-            <strong class="model-card-title">Modelo rápido</strong>
-            <p class="model-card-desc">Títulos y clasificación rápida. Puede ser uno más pequeño y barato.</p>
-            <select v-if="models.length" v-model="form.generation.fastModel">
-              <option value="">— Selecciona un modelo —</option>
-              <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
-              <option v-if="form.generation.fastModel && !models.includes(form.generation.fastModel)" :value="form.generation.fastModel">{{ form.generation.fastModel }}</option>
-            </select>
-            <input v-else v-model="form.generation.fastModel" placeholder="Ej: claude-haiku-4-5 · deepseek-chat" />
+        <!-- EN TU EQUIPO: aquí sí se traen y eligen modelos (Ollama/LM Studio/LiteLLM no tienen catálogo fijo). -->
+        <template v-if="form.generation.mode === 'local'">
+          <!-- Conectar + traer modelos -->
+          <div class="connect-row">
+            <button class="btn primary" style="gap:6px" @click="connect" :disabled="connecting || !endpointReady">
+              <Plug :size="15" :stroke-width="2" /> {{ connecting ? "Conectando…" : "Conectar y traer modelos" }}
+            </button>
+            <button v-if="models.length" class="btn ghost" @click="loadModels" :disabled="modelsLoading" title="Recargar modelos">
+              <RefreshCw :size="14" :stroke-width="2" :class="{ 'spinning-slow': modelsLoading }" />
+            </button>
+            <span v-if="models.length" class="connected-pill"><CheckCheck :size="14" :stroke-width="2.5" /> {{ models.length }} modelos</span>
           </div>
-        </div>
+          <div v-if="modelsError" class="models-error-banner">⚠ {{ modelsError }}</div>
+
+          <!-- Modelo principal -->
+          <div class="model-card">
+            <div class="model-card-icon"><Sparkles :size="22" :stroke-width="1.8" /></div>
+            <div class="model-card-body">
+              <strong class="model-card-title">Modelo principal</strong>
+              <p class="model-card-desc">Conversar, generar la app y documentar. El potente — debe soportar function-calling.</p>
+              <select v-if="models.length" v-model="form.generation.mainModel">
+                <option value="">— Selecciona un modelo —</option>
+                <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
+                <option v-if="form.generation.mainModel && !models.includes(form.generation.mainModel)" :value="form.generation.mainModel">{{ form.generation.mainModel }}</option>
+              </select>
+              <input v-else v-model="form.generation.mainModel" placeholder="Ej: claude-sonnet-4-6 · deepseek-chat" />
+            </div>
+          </div>
+
+          <!-- Modelo rápido -->
+          <div class="model-card">
+            <div class="model-card-icon"><Zap :size="22" :stroke-width="1.8" /></div>
+            <div class="model-card-body">
+              <strong class="model-card-title">Modelo rápido</strong>
+              <p class="model-card-desc">Títulos y clasificación rápida. Puede ser uno más pequeño y barato.</p>
+              <select v-if="models.length" v-model="form.generation.fastModel">
+                <option value="">— Selecciona un modelo —</option>
+                <option v-for="m in models" :key="m" :value="m">{{ m }}</option>
+                <option v-if="form.generation.fastModel && !models.includes(form.generation.fastModel)" :value="form.generation.fastModel">{{ form.generation.fastModel }}</option>
+              </select>
+              <input v-else v-model="form.generation.fastModel" placeholder="Ej: claude-haiku-4-5 · deepseek-chat" />
+            </div>
+          </div>
+        </template>
 
         <!-- Embeddings: fijo en local, no se configura -->
         <div class="model-card locked">
           <div class="model-card-icon emb"><Search :size="22" :stroke-width="1.8" /></div>
           <div class="model-card-body">
             <strong class="model-card-title">Búsqueda semántica <span class="auto-tag">automático</span></strong>
-            <p class="model-card-desc">Siempre en tu equipo, sin configurar. Se descarga sola la primera vez.</p>
+            <p class="model-card-desc">La hace Nucleus en tu equipo, sin configurar. Se descarga sola la primera vez.</p>
           </div>
-          <div class="locked-pill"><Lock :size="13" :stroke-width="2" /> bge-m3 · local · 1024d</div>
+          <div class="locked-pill"><Lock :size="13" :stroke-width="2" /> Nucleus · local</div>
         </div>
 
         <div class="step-actions">
@@ -354,7 +408,7 @@ onMounted(load);
         </button>
 
         <div v-if="verifyResults" class="verify-results">
-          <div class="verify-row" v-for="key in ['provider', 'main', 'fast', 'tools', 'embeddings']" :key="key">
+          <div class="verify-row" v-for="key in ['provider', 'main', 'fast', 'tools']" :key="key">
             <div class="verify-row-main">
               <span class="verify-dot" :class="verifyResults[key]?.ok ? 'ok' : 'error'" />
               <div class="verify-info">
@@ -535,6 +589,32 @@ onMounted(load);
   background: var(--green-bg); border: 1px solid var(--green-border);
   padding: 6px 12px; border-radius: 9px;
 }
+
+/* ── Nube: modelos preseleccionados ── */
+.preset-block { margin: 4px 0 16px; }
+.preset-line {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 13.5px; color: var(--text); line-height: 1.45; margin-bottom: 10px;
+}
+.preset-line svg { color: var(--accent); flex-shrink: 0; }
+.preset-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.preset-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--font-mono); font-size: 12.5px; color: var(--text);
+  background: var(--bg-surface); border: 1.5px solid var(--border);
+  padding: 7px 12px; border-radius: 9px;
+}
+.preset-chip svg { color: var(--accent); }
+.preset-chip.alt svg { color: var(--text-muted); }
+.adv { margin-top: 14px; }
+.adv > summary {
+  cursor: pointer; font-size: 12.5px; color: var(--text-muted);
+  list-style: none; user-select: none; width: fit-content;
+}
+.adv > summary::-webkit-details-marker { display: none; }
+.adv > summary::before { content: "▸ "; color: var(--text-dim); }
+.adv[open] > summary::before { content: "▾ "; }
+.adv > summary:hover { color: var(--text); }
 
 /* ── Model cards ── */
 .model-card {

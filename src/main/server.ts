@@ -3,7 +3,6 @@ import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import { ensureSchema } from "./db/bootstrap";
 import { startBackgroundLoop } from "./agents/runner";
-import { startQdrant } from "./qdrant/launcher";
 import { registerHealthRoutes } from "./routes/health";
 import { registerConfigRoutes } from "./routes/config";
 import { registerProjectRoutes } from "./routes/projects";
@@ -22,17 +21,10 @@ import { registerPromptRoutes } from "./routes/prompts";
 import { registerAttachRoutes } from "./routes/attach";
 import { registerLlmRoutes } from "./routes/llm";
 import { registerLibraryRoutes } from "./routes/library";
-import { startCollectionsIndex } from "./qdrant/collections";
 import { startWatcher } from "./watcher";
 
 export async function startServer(): Promise<void> {
   await ensureSchema();
-
-  try {
-    await startQdrant();
-  } catch (e) {
-    console.warn("[qdrant] no se pudo arrancar:", (e as Error).message);
-  }
 
   const app = Fastify({ logger: { level: "info" } });
 
@@ -68,6 +60,5 @@ export async function startServer(): Promise<void> {
   await app.listen({ port, host });
   app.log.info("AutoCode API up");
 
-  startCollectionsIndex().catch((e: any) => app.log.warn(e, "collections index failed"));
   startWatcher(app.log).catch((e: any) => app.log.warn(e, "watcher failed"));
 }

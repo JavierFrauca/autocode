@@ -1,10 +1,6 @@
-import { and, eq } from "drizzle-orm";
-import { randomUUID } from "node:crypto";
 import type { AppConfig } from "@shared";
-import { EMBEDDINGS_DIM } from "@shared";
-import { db, schema } from "../db/client.js";
-import { embed } from "../llm/client.js";
-import { QdrantClient } from "../qdrant/client.js";
+import { nucleusIngestDoc } from "../nucleus/client.js";
+import { domainForCollection } from "../nucleus/domains.js";
 
 const CHUNK_SIZE = 1200;
 const CHUNK_OVERLAP = 200;
@@ -57,72 +53,31 @@ export function chunkMarkdown(body: string): { text: string; headingPath: string
   return chunks;
 }
 
+/**
+ * Indexa (o re-indexa) un documento en Nucleus. El motor trocea, embebe e indexa internamente, así que
+ * NO troceamos aquí; pasamos el texto entero. Idempotente por `source` (la ruta): el ingest borra el
+ * documento previo con esa fuente antes de meter el nuevo. `cfg`/`revisionId` se mantienen por
+ * compatibilidad de firma (los llamantes no cambian). Devuelve cuántos chunks generó Nucleus.
+ */
 export async function ingestRevision(
-  cfg: AppConfig,
+  _cfg: AppConfig,
   projectId: string,
   collection: string,
   documentId: string,
-  revisionId: string,
+  _revisionId: string,
   documentPath: string,
   documentTitle: string,
   body: string,
 ): Promise<number> {
-  const qdrant = new QdrantClient(cfg.qdrantUrl);
-  await qdrant.ensureCollection(collection, EMBEDDINGS_DIM);
-
-  // Remove old points for this document (we re-index the latest)
-  await qdrant.deleteByFilter(collection, {
-    must: [{ key: "document_id", match: { value: documentId } }],
+  if (!body.trim()) return 0;
+  const domain = domainForCollection(projectId, collection);
+  const r = await nucleusIngestDoc(domain, {
+    source: documentPath,
+    title: documentTitle,
+    text: body,
+    // La metadata se hereda en los chunks → la búsqueda recupera path/título/ids sin re-consultar.
+    metadata: { path: documentPath, title: documentTitle, document_id: documentId, project_id: projectId },
+    labels: [documentPath.split("/")[0] ?? "doc"],
   });
-  await db()
-    .delete(schema.embeddingsIndex)
-    .where(
-      and(
-        eq(schema.embeddingsIndex.projectId, projectId),
-        eq(schema.embeddingsIndex.documentId, documentId),
-      ),
-    );
-
-  const chunks = chunkMarkdown(body);
-  if (chunks.length === 0) return 0;
-
-  const vectors = await embed(cfg, chunks.map((c) => c.text), "ingest");
-  if (vectors.length !== chunks.length) throw new Error("Embed count mismatch");
-
-  const points = chunks.map((c, i) => {
-    // Qdrant SOLO acepta point ids que sean entero sin signo o UUID. Un ULID NO vale (da 400 y el
-    // chunk no se indexa). Por eso usamos randomUUID.
-    const pid = randomUUID();
-    return {
-      id: pid,
-      vector: vectors[i]!,
-      payload: {
-        project_id: projectId,
-        document_id: documentId,
-        revision_id: revisionId,
-        chunk_index: i,
-        path: documentPath,
-        title: documentTitle,
-        heading_path: c.headingPath,
-        text: c.text,
-      },
-    };
-  });
-
-  await qdrant.upsert(collection, points);
-
-  await db()
-    .insert(schema.embeddingsIndex)
-    .values(
-      points.map((p, i) => ({
-        id: `eix_${p.id}`,
-        projectId,
-        documentId,
-        revisionId,
-        chunkIndex: i,
-        qdrantPointId: p.id,
-      })),
-    );
-
-  return points.length;
+  return r.chunk_count ?? 0;
 }

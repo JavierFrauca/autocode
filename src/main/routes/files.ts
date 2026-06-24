@@ -9,6 +9,39 @@ import { ingestRevision } from "../papers/ingest.js";
 import { searchDocuments } from "../tools/knowledge.js";
 import { getArchitecture } from "../architecture.js";
 import { ensureMockupForScreen, isMockupStale, isScreenDoc, mockupPathFor } from "../agents/mockup.js";
+import { nucleusDeleteDoc } from "../nucleus/client.js";
+import { projectDomain } from "../nucleus/domains.js";
+import { chat } from "../llm/client.js";
+import { saveProjectDocument } from "../papers/save.js";
+import type { AppConfig } from "@shared";
+
+/** Quita vallas ```markdown … ``` si el modelo las añade. */
+function stripMdFence(raw: string): string {
+  const s = (raw ?? "").trim();
+  const m = s.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i);
+  return (m?.[1] ?? s).trim();
+}
+
+/** Aplica con IA un cambio en lenguaje natural sobre la especificación (Markdown) de una pantalla. */
+async function editSpecWithAi(cfg: AppConfig, spec: string, instruction: string): Promise<string> {
+  const messages = [
+    {
+      role: "system" as const,
+      content:
+        "Eres un editor de especificaciones de pantalla en Markdown. Aplica EXACTAMENTE el cambio que " +
+        "pide el usuario sobre la especificación dada, conservando el resto del contenido, el estilo y la " +
+        "estructura. No añadas comentarios ni explicaciones. Devuelve SOLO el Markdown completo ya actualizado.",
+    },
+    {
+      role: "user" as const,
+      content:
+        `Especificación actual:\n\n${spec}\n\nCambio a aplicar:\n"${instruction}"\n\n` +
+        "Devuelve la especificación completa ya modificada (solo Markdown, sin vallas de código).",
+    },
+  ];
+  const res = await chat(cfg, "chat", messages, { temperature: 0.2, maxTokens: 4000 }, "screen-modify");
+  return stripMdFence(res.content);
+}
 
 async function getProject(projectId: string) {
   const rows = await db().select().from(schema.projects).where(eq(schema.projects.id, projectId));
@@ -114,23 +147,90 @@ export async function registerFilesRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  // POST /api/projects/:id/screens/mockup { path } — (re)genera la maqueta (botón del usuario)
+  // POST /api/projects/:id/screens/mockup { path, instruction? } — (re)genera la maqueta (botón del
+  // usuario). Con `instruction` ("modificar con IA") modifica el boceto actual según lo que pida.
   app.post("/api/projects/:id/screens/mockup", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const { path: relPath } = (req.body ?? {}) as { path?: string };
+    const { path: relPath, instruction } = (req.body ?? {}) as { path?: string; instruction?: string };
     if (!relPath) return reply.code(400).send({ error: "path required" });
     if (!isScreenDoc(relPath)) return reply.code(400).send({ error: "no es una pantalla" });
     const project = await getProject(id).catch(() => null);
     if (!project) return reply.code(404).send({ error: "not found" });
     const cfg = await loadConfig();
     const appType = (await getArchitecture(id))?.appType ?? "electron";
-    const r = await ensureMockupForScreen(cfg, id, relPath, { force: true, appType });
+    const r = await ensureMockupForScreen(cfg, id, relPath, { force: true, appType, instruction });
     if (r.status !== "generated") {
       return reply.code(500).send({ error: "no se pudo generar la maqueta" });
     }
     const abs = path.resolve(project.rootPath, r.path!);
     const html = await fs.readFile(abs, "utf-8").catch(() => null);
     return { ok: true, html };
+  });
+
+  // POST /api/projects/:id/screens/modify { path, instruction } — "Modificar con IA" coherente: aplica
+  // el cambio al SPEC (.md, fuente de verdad) y regenera la maqueta desde el spec ya actualizado.
+  app.post("/api/projects/:id/screens/modify", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { path: relPath, instruction } = (req.body ?? {}) as { path?: string; instruction?: string };
+    if (!relPath || !instruction?.trim()) return reply.code(400).send({ error: "path e instruction requeridos" });
+    if (!isScreenDoc(relPath)) return reply.code(400).send({ error: "no es una pantalla" });
+    const project = await getProject(id).catch(() => null);
+    if (!project) return reply.code(404).send({ error: "not found" });
+    const abs = path.resolve(project.rootPath, relPath);
+    if (!abs.startsWith(project.rootPath)) return reply.code(400).send({ error: "invalid path" });
+    const spec = await fs.readFile(abs, "utf-8").catch(() => null);
+    if (spec === null) return reply.code(404).send({ error: "spec no encontrado" });
+
+    const cfg = await loadConfig();
+    let newSpec: string;
+    try {
+      newSpec = await editSpecWithAi(cfg, spec, instruction.trim());
+    } catch (e: any) {
+      return reply.code(500).send({ error: `la IA no pudo editar la especificación: ${e?.message ?? e}` });
+    }
+    if (!newSpec.trim()) return reply.code(500).send({ error: "la IA devolvió una especificación vacía" });
+
+    // Guarda el spec por el camino canónico (disco + tabla documents + revisión + reindex en Nucleus).
+    await saveProjectDocument(cfg, id, { ruta: relPath, contenido: newSpec });
+    // Regenera el boceto desde el spec ya actualizado.
+    const appType = (await getArchitecture(id))?.appType ?? "electron";
+    const r = await ensureMockupForScreen(cfg, id, relPath, { force: true, appType });
+    const html = r.status === "generated"
+      ? await fs.readFile(path.resolve(project.rootPath, r.path!), "utf-8").catch(() => null)
+      : null;
+    return { ok: true, spec: newSpec, html };
+  });
+
+  // GET /api/projects/:id/screens — todas las pantallas con su maqueta (para la galería viva).
+  app.get("/api/projects/:id/screens", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const project = await getProject(id).catch(() => null);
+    if (!project) return reply.code(404).send({ error: "not found" });
+    const dir = path.join(project.rootPath, "pantallas");
+    let names: string[] = [];
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true });
+      names = entries
+        .filter((e) => e.isFile() && e.name.toLowerCase().endsWith(".md") && !e.name.toLowerCase().endsWith(".fuente.md"))
+        .map((e) => e.name)
+        .sort((a, b) => a.localeCompare(b));
+    } catch {
+      return { screens: [] }; // aún no hay carpeta de pantallas
+    }
+    const screens = await Promise.all(names.map(async (name) => {
+      const relPath = `pantallas/${name}`;
+      const htmlAbs = path.resolve(project.rootPath, mockupPathFor(relPath));
+      const html = await fs.readFile(htmlAbs, "utf-8").catch(() => null);
+      const stale = html ? await isMockupStale(project.rootPath, relPath) : false;
+      return {
+        path: relPath,
+        name: name.replace(/\.md$/i, "").replace(/-/g, " "),
+        mockupExists: !!html,
+        stale,
+        html,
+      };
+    }));
+    return { screens };
   });
 
   // POST /api/projects/:id/files/search — búsqueda semántica via Qdrant
@@ -257,13 +357,9 @@ async function ingestFile(
 
 async function removeFile(
   projectId: string,
-  project: { qdrantCollection: string },
+  _project: { qdrantCollection: string },
   relPath: string,
 ): Promise<void> {
-  const { QdrantClient } = await import("../qdrant/client.js");
-  const cfg = await loadConfig();
-  const qdrant = new QdrantClient(cfg.qdrantUrl);
-
   const existing = await db()
     .select()
     .from(schema.documents)
@@ -271,11 +367,7 @@ async function removeFile(
   if (!existing[0]) return;
 
   const docId = existing[0].id;
-  await qdrant.deleteByFilter(project.qdrantCollection, {
-    must: [{ key: "document_id", match: { value: docId } }],
-  });
-  await db().delete(schema.embeddingsIndex)
-    .where(and(eq(schema.embeddingsIndex.projectId, projectId), eq(schema.embeddingsIndex.documentId, docId)));
+  try { await nucleusDeleteDoc(projectDomain(projectId), relPath); } catch { /* best-effort */ }
   await db().update(schema.documents)
     .set({ deletedAt: new Date().toISOString() })
     .where(eq(schema.documents.id, docId));

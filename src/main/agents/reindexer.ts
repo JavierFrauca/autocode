@@ -1,8 +1,6 @@
 import { and, desc, eq } from "drizzle-orm";
 import type { AppConfig } from "@shared";
-import { EMBEDDINGS_DIM, EMBEDDINGS_MODEL } from "@shared";
 import { db, schema } from "../db/client.js";
-import { QdrantClient } from "../qdrant/client.js";
 import { ingestRevision } from "../papers/ingest.js";
 
 interface ReindexerOutput {
@@ -18,10 +16,8 @@ export const runReindexer = {
       .where(eq(schema.projects.id, projectId)))[0];
     if (!project) throw new Error("project not found");
 
-    const qdrant = new QdrantClient(cfg.qdrantUrl);
-    try { await qdrant.deleteCollection(project.qdrantCollection); } catch {}
-    await qdrant.ensureCollection(project.qdrantCollection, EMBEDDINGS_DIM);
-
+    // Nucleus reindexa por documento de forma idempotente (borra el previo por `source`). No hay que
+    // recrear ninguna "colección": basta reingestar la última revisión de cada documento.
     const docs = await db()
       .select()
       .from(schema.documents)
@@ -57,6 +53,6 @@ export const runReindexer = {
       count++;
     }
     const output: ReindexerOutput = { documents: count, chunks };
-    return { output, modelRole: "embeddings", modelName: EMBEDDINGS_MODEL, requiresGate: false };
+    return { output, modelRole: "embeddings", modelName: "nucleus (multilingual-e5-small)", requiresGate: false };
   },
 };

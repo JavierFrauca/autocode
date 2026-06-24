@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAppStore } from "../stores";
 import {
   MessageCircle, FileText, Rocket, Settings,
-  LayoutGrid, Moon, Sun, Minus, Square, X, Wifi, WifiOff, Loader, History, ImageIcon, Activity, Terminal, BookOpen,
+  LayoutGrid, Moon, Sun, Minus, Square, X, Wifi, WifiOff, Loader, Play, ImageIcon, Activity, Terminal, BookOpen,
 } from "lucide-vue-next";
 
 const route  = useRoute();
@@ -27,7 +27,7 @@ const llmRunning = computed(() => !!app.llmActivity?.current);
 const statusLabel = computed(() => {
   if (llmRunning.value)        return "IA pensando…";
   if (!services.value.provider) return "IA no conectada";
-  if (!services.value.db)      return "BD offline";
+  if (!services.value.db)      return "Sin conexión";
   return "Listo";
 });
 
@@ -79,7 +79,7 @@ function buscarActualizaciones() { window.dispatchEvent(new CustomEvent("autocod
           <Rocket :size="15" :stroke-width="2" /> Generar app
         </router-link>
         <router-link :to="`/projects/${projectId}/versions`" class="topnav-tab" :class="{ active: isActiveTab('versions') }">
-          <History :size="15" :stroke-width="2" /> Versiones
+          <Play :size="15" :stroke-width="2" /> Ejecutar
         </router-link>
       </nav>
     </template>

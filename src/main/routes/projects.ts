@@ -3,11 +3,9 @@ import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { ulid } from "ulid";
 import { z } from "zod";
-import { EMBEDDINGS_DIM } from "@shared";
 import { db, schema } from "../db/client.js";
 import { loadConfig } from "../config.js";
 import { ensureDir } from "../papers/fs.js";
-import { QdrantClient } from "../qdrant/client.js";
 
 const CreateSchema = z.object({
   name: z.string().min(1),
@@ -114,17 +112,15 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       await ensureDir(path.join(rootPath, folder));
     }
 
-    const collection = `project_${id.replace(/^proj_/, "")}`;
-    const qdrant = new QdrantClient(cfg.qdrantUrl);
-    await qdrant.ensureCollection(collection, EMBEDDINGS_DIM);
-
+    // Nucleus indexa por dominio (`proj:<id>`), creado bajo demanda en el primer ingest. Las columnas
+    // `qdrantCollection`/`embeddingsDim` quedan inertes (compat de esquema); no se crea nada externo.
     await db().insert(schema.projects).values({
       id,
       name: parsed.data.name,
       rootPath,
       description: parsed.data.description ?? null,
-      qdrantCollection: collection,
-      embeddingsDim: EMBEDDINGS_DIM,
+      qdrantCollection: `proj_${id.replace(/^proj_/, "")}`,
+      embeddingsDim: 384,
     });
 
     return { id, name: parsed.data.name, rootPath };

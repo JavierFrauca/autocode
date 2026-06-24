@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { app } from "electron";
-import { reindexKbFile } from "../qdrant/collections.js";
+import { reindexKbFile } from "../nucleus/kb.js";
 import { log } from "../log.js";
 
 type Source = "library" | "templates";

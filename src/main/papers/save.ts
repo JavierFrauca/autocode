@@ -5,6 +5,8 @@ import { ulid } from "ulid";
 import type { AppConfig } from "@shared";
 import { db, schema } from "../db/client.js";
 import { ingestRevision } from "./ingest.js";
+import { nucleusDeleteDoc } from "../nucleus/client.js";
+import { projectDomain } from "../nucleus/domains.js";
 import { log } from "../log.js";
 
 /**
@@ -99,7 +101,7 @@ export async function saveProjectDocument(
   try {
     await ingestRevision(cfg, projectId, collection, docId, revId, ruta, title, contenido);
   } catch (e) {
-    log.warn("save", "ingest a Qdrant falló (el fichero se guardó igual en disco y BD)", { err: e, ruta });
+    log.warn("save", "indexado en Nucleus falló (el fichero se guardó igual en disco y BD)", { err: e, ruta });
   }
 
   return { docId, revId, ruta, created };
@@ -128,15 +130,10 @@ export async function deleteProjectDocument(
   const docId = existing[0].id;
 
   try {
-    const { QdrantClient } = await import("../qdrant/client.js");
-    const qdrant = new QdrantClient(cfg.qdrantUrl);
-    const collection = project.qdrantCollection;
-    await qdrant.deleteByFilter(collection, { must: [{ key: "document_id", match: { value: docId } }] });
+    await nucleusDeleteDoc(projectDomain(projectId), ruta);
   } catch (e) {
-    log.warn("save", "no se pudo limpiar Qdrant al borrar", { err: e, ruta });
+    log.warn("save", "no se pudo limpiar el índice al borrar", { err: e, ruta });
   }
-  await db().delete(schema.embeddingsIndex)
-    .where(and(eq(schema.embeddingsIndex.projectId, projectId), eq(schema.embeddingsIndex.documentId, docId)));
   await db().update(schema.documents)
     .set({ deletedAt: new Date().toISOString() })
     .where(eq(schema.documents.id, docId));

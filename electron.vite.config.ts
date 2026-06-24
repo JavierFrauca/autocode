@@ -22,7 +22,8 @@ export default defineConfig({
         // al `index.js`, para poder lanzarlo con `new Worker(...)` desde el proceso main.
         input: {
           index: resolve(__dirname, "src/main/index.ts"),
-          "embed-worker": resolve(__dirname, "src/main/llm/embed-worker.ts"),
+          // Worker de Nucleus (motor RAG por DLL): se emite como `out/main/nucleus-worker.js`.
+          "nucleus-worker": resolve(__dirname, "src/main/nucleus/nucleus-worker.ts"),
         },
       },
     },
