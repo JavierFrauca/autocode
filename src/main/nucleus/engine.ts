@@ -19,9 +19,11 @@ interface Fns {
   create_domain: koffi.KoffiFunction;
   ingest_text: koffi.KoffiFunction;
   search: koffi.KoffiFunction;
+  search_multi: koffi.KoffiFunction;
   list_domains: koffi.KoffiFunction;
   list_documents: koffi.KoffiFunction;
   delete_document: koffi.KoffiFunction;
+  delete_domain: koffi.KoffiFunction;
   persist: koffi.KoffiFunction;
 }
 
@@ -40,9 +42,11 @@ function loadLib(): Fns {
     create_domain: lib.func("int nucleus_create_domain(void* handle, const char* input_json, _Out_ NucleusOwnedStr* out_json)"),
     ingest_text: lib.func("int nucleus_ingest_text(void* handle, const char* input_json, _Out_ NucleusOwnedStr* out_json)"),
     search: lib.func("int nucleus_search(void* handle, const char* input_json, _Out_ NucleusOwnedStr* out_json)"),
+    search_multi: lib.func("int nucleus_search_multi(void* handle, const char* input_json, _Out_ NucleusOwnedStr* out_json)"),
     list_domains: lib.func("int nucleus_list_domains(void* handle, _Out_ NucleusOwnedStr* out_json)"),
     list_documents: lib.func("int nucleus_list_documents(void* handle, const char* input_json, _Out_ NucleusOwnedStr* out_json)"),
     delete_document: lib.func("int nucleus_delete_document(void* handle, const char* input_json, _Out_ NucleusOwnedStr* out_json)"),
+    delete_domain: lib.func("int nucleus_delete_domain(void* handle, const char* input_json, _Out_ NucleusOwnedStr* out_json)"),
     persist: lib.func("int nucleus_persist_indexes(void* handle, _Out_ NucleusOwnedStr* out_json)"),
   };
   return fns;
@@ -116,8 +120,16 @@ export class NucleusEngine {
   ingestText(input: IngestInput): { document_id: number; chunk_count: number } {
     return this.call(this.f.ingest_text, input);
   }
-  search(input: SearchInput): { hits: { chunk: any; score: number }[] } {
+  search(input: SearchInput): { hits: { chunk: any; score: number; snippet?: string }[] } {
     return this.call(this.f.search, input);
+  }
+  /** Búsqueda en varios dominios a la vez (deben compartir modelo). `diversity` ∈ [0,1] = MMR. */
+  searchMulti(input: { domain_ids: number[]; query: string; k?: number; filter?: string; diversity?: number }): { hits: { chunk: any; score: number; snippet?: string }[] } {
+    return this.call(this.f.search_multi, input);
+  }
+  /** Borra un dominio entero en cascada (subdominios, documentos, chunks, tags). */
+  deleteDomain(domainId: number): any {
+    return this.call(this.f.delete_domain, { domain_id: domainId });
   }
   listDomains(): { domains: any[] } {
     return this.call(this.f.list_domains);

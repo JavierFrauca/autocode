@@ -50,9 +50,12 @@ Proyecto **npm** único gestionado con **electron-vite**. Un solo `npm run dev` 
 - **Búsqueda semántica + embeddings**: **Nucleus**, un motor RAG propio escrito en Rust, embebido
   **in-process como DLL** (`vendor/nucleus/nucleus.dll`, vía **koffi** en un `worker_thread` —
   `src/main/nucleus/`). En una sola pieza hace almacenamiento (redb), **embeddings**
-  (`multilingual-e5-small`, 384d, en proceso) y **búsqueda híbrida vector + BM25**: **sin servidor, sin
-  puerto, sin sidecar**. BBDD en `C:\ProgramData\AutoCode\nucleus.redb`; el modelo se descarga solo la
-  primera vez. **Un dominio por proyecto.** El usuario no configura nada de búsqueda ni embeddings.
+  (`multilingual-e5-small`, 384d, en proceso) y **búsqueda híbrida vector + BM25 con reordenado MMR**
+  (diversidad): **sin servidor, sin puerto, sin sidecar**. BBDD en `C:\ProgramData\AutoCode\nucleus.redb`;
+  el modelo se descarga solo la primera vez. **Un dominio por proyecto** (la búsqueda multi-proyecto va
+  en una sola llamada `search_multi`). El usuario no configura nada de búsqueda ni embeddings.
+  > Adaptarse a una versión nueva del motor es **copiar la DLL**: el C ABI es aditivo y el worker
+  > reconstruye el índice solo si cambia el formato en disco (`src/main/nucleus/nucleus-worker.ts`).
 - **LLM de generación**: el usuario **conecta un proveedor directamente** (ver [§6](#6-proveedores-y-modelos-de-llm)).
 
 ```

@@ -71,6 +71,11 @@ export function nucleusDeleteDoc(domain: string, source: string): Promise<{ remo
   return call("deleteDoc", { domain, source });
 }
 
+/** Borra un dominio entero (al eliminar un proyecto). En cascada. */
+export function nucleusDeleteDomain(domain: string): Promise<{ removed: number }> {
+  return call("deleteDomain", { domain });
+}
+
 /** Búsqueda híbrida (vector + BM25) en uno o varios dominios; fusiona por score. */
 export function nucleusSearch(domains: string[], query: string, k = 5): Promise<RawHit[]> {
   return call<{ hits: RawHit[] }>("search", { domains, query, k }).then((r) => r.hits);

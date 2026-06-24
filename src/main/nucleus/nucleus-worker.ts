@@ -1,7 +1,8 @@
+import { existsSync, rmSync } from "node:fs";
 import { parentPort } from "node:worker_threads";
 import { NucleusEngine } from "./engine.js";
 import { indexAll, isEmpty, type KbDirs, type ProjectRef } from "./indexer.js";
-import { deleteDoc, ingestDoc, searchDomains, type IngestArgs } from "./ops.js";
+import { deleteDoc, deleteDomainByName, ingestDoc, searchDomains, type IngestArgs } from "./ops.js";
 import { nucleusDbPath, nucleusModelCache } from "./paths.js";
 
 /**
@@ -12,15 +13,29 @@ import { nucleusDbPath, nucleusModelCache } from "./paths.js";
 
 let engine: NucleusEngine | null = null;
 function ensureEngine(): NucleusEngine {
-  if (!engine) {
-    engine = NucleusEngine.open({ dbPath: nucleusDbPath(), modelCache: nucleusModelCache(), indexKind: "flat" });
+  if (engine) return engine;
+  const opts = { dbPath: nucleusDbPath(), modelCache: nucleusModelCache(), indexKind: "flat" as const };
+  try {
+    engine = NucleusEngine.open(opts);
+  } catch (e) {
+    // La BBDD es un índice DERIVADO (reconstruible desde los .md). Si una versión nueva de la DLL no
+    // puede abrir un esquema antiguo, la borramos y reintentamos UNA vez; el indexador diferido la
+    // repuebla. Así actualizar la DLL nunca deja la búsqueda rota.
+    const db = nucleusDbPath();
+    try {
+      if (existsSync(db)) rmSync(db, { force: true });
+      if (existsSync(db + ".lock")) rmSync(db + ".lock", { force: true });
+      engine = NucleusEngine.open(opts);
+    } catch {
+      throw e;
+    }
   }
   return engine;
 }
 
 interface Msg {
   id: number;
-  type: "isEmpty" | "indexAll" | "ingestDoc" | "deleteDoc" | "search";
+  type: "isEmpty" | "indexAll" | "ingestDoc" | "deleteDoc" | "deleteDomain" | "search";
   projects?: ProjectRef[];
   kb?: KbDirs;
   domain?: string;
@@ -46,6 +61,9 @@ parentPort?.on("message", async (msg: Msg) => {
         break;
       case "deleteDoc":
         result = { removed: deleteDoc(ensureEngine(), msg.domain!, msg.source!) };
+        break;
+      case "deleteDomain":
+        result = { removed: deleteDomainByName(ensureEngine(), msg.domain!) };
         break;
       case "search":
         result = { hits: searchDomains(ensureEngine(), msg.domains ?? [], msg.query ?? "", msg.k ?? 5) };

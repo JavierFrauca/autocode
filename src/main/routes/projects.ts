@@ -6,6 +6,8 @@ import { z } from "zod";
 import { db, schema } from "../db/client.js";
 import { loadConfig } from "../config.js";
 import { ensureDir } from "../papers/fs.js";
+import { nucleusDeleteDomain } from "../nucleus/client.js";
+import { projectDomain } from "../nucleus/domains.js";
 
 const CreateSchema = z.object({
   name: z.string().min(1),
@@ -140,6 +142,8 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
       .update(schema.projects)
       .set({ deletedAt: new Date().toISOString() })
       .where(and(eq(schema.projects.id, id), isNull(schema.projects.deletedAt)));
+    // Saca su índice de Nucleus en cascada (best-effort: el borrado del proyecto no debe fallar por esto).
+    nucleusDeleteDomain(projectDomain(id)).catch(() => { /* el dominio puede no existir aún */ });
     return { ok: true };
   });
 }

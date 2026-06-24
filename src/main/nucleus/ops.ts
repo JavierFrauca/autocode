@@ -84,19 +84,34 @@ export interface RawHit {
   metadata: Record<string, string>;
 }
 
-/** Busca en varios dominios y fusiona por score (top-k global). */
+// MMR por defecto: penaliza un poco la redundancia entre fragmentos del contexto (más variedad, menos
+// repetir lo mismo). 0 = pura relevancia; subirlo da más diversidad a cambio de algo de relevancia.
+const SEARCH_DIVERSITY = 0.3;
+
+/** Busca en varios dominios A LA VEZ (una sola llamada al motor, con fusión + MMR). */
 export function searchDomains(eng: NucleusEngine, domains: string[], query: string, k: number): RawHit[] {
-  const all: RawHit[] = [];
+  // Resolver nombres → ids SIN crear los que falten (un dominio inexistente no aporta resultados).
+  const ids: number[] = [];
   for (const name of domains) {
     const id = domainIdIfExists(eng, name);
-    if (id === null) continue;
-    const r = eng.search({ domain_id: id, query, k });
-    for (const h of r.hits ?? []) {
-      all.push({ score: h.score, text: h.chunk?.text ?? "", metadata: h.chunk?.metadata ?? {} });
-    }
+    if (id !== null) ids.push(id);
   }
-  all.sort((a, b) => b.score - a.score);
-  return all.slice(0, k);
+  if (ids.length === 0) return [];
+  const r = eng.searchMulti({ domain_ids: ids, query, k, diversity: SEARCH_DIVERSITY });
+  return (r.hits ?? []).map((h) => ({
+    score: h.score,
+    text: h.chunk?.text ?? "",
+    metadata: h.chunk?.metadata ?? {},
+  }));
+}
+
+/** Borra un dominio entero por nombre (cascada). Devuelve 1 si existía, 0 si no. */
+export function deleteDomainByName(eng: NucleusEngine, name: string): number {
+  const id = domainIdIfExists(eng, name);
+  if (id === null) return 0;
+  eng.deleteDomain(id);
+  domainCache.delete(name);
+  return 1;
 }
 
 /** Olvida la caché de dominios (p.ej. si el motor se reabre). */
