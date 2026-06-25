@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAppStore } from "../stores";
 import {
   MessageCircle, FileText, Rocket, Settings,
-  LayoutGrid, Moon, Sun, Minus, Square, X, Wifi, WifiOff, Loader, Play, ImageIcon, Activity, Terminal, BookOpen,
+  LayoutGrid, Moon, Sun, Minus, Square, X, Wifi, WifiOff, Loader, Play, ImageIcon, Activity, Terminal, BookOpen, LayoutTemplate,
 } from "lucide-vue-next";
 
 const route  = useRoute();
@@ -74,6 +74,9 @@ function buscarActualizaciones() { window.dispatchEvent(new CustomEvent("autocod
         </router-link>
         <router-link :to="`/projects/${projectId}/docs`" class="topnav-tab" :class="{ active: isActiveTab('docs') }">
           <FileText :size="15" :stroke-width="2" /> Documentos
+        </router-link>
+        <router-link :to="`/projects/${projectId}/screens`" class="topnav-tab" :class="{ active: isActiveTab('screens') }">
+          <LayoutTemplate :size="15" :stroke-width="2" /> Pantallas
         </router-link>
         <router-link :to="`/projects/${projectId}/app`" class="topnav-tab" :class="{ active: isActiveTab('app') }">
           <Rocket :size="15" :stroke-width="2" /> Generar app

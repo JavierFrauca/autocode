@@ -17,6 +17,13 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await r.json()) as T;
 }
 
+export interface ScreenMapNode {
+  slug: string;
+  name: string;
+  kind: "pagina" | "modal";
+  children: ScreenMapNode[];
+}
+
 export const api = {
   health: () => req<any>("/api/health"),
   llmActivity: () => req<any>("/api/llm-activity"),
@@ -88,10 +95,34 @@ export const api = {
   modifyScreen: (projectId: string, path: string, instruction: string) =>
     req<{ ok: boolean; spec: string | null; html: string | null }>(
       `/api/projects/${projectId}/screens/modify`, { method: "POST", body: JSON.stringify({ path, instruction }) }),
-  // Todas las pantallas con su maqueta (para la galería viva).
+  // Todas las pantallas con su maqueta y su jerarquía (página/modal, padre, orden).
   listScreens: (projectId: string) =>
-    req<{ screens: { path: string; name: string; mockupExists: boolean; stale: boolean; html: string | null }[] }>(
+    req<{ screens: { path: string; slug: string; name: string; kind: "pagina" | "modal"; parent: string | null; order: number; mockupExists: boolean; stale: boolean; html: string | null }[] }>(
       `/api/projects/${projectId}/screens`),
+  // Crea una pantalla (página o modal de otra).
+  createScreen: (projectId: string, name: string, kind: "pagina" | "modal" = "pagina", parent: string | null = null) =>
+    req<{ ok: boolean; path: string; slug: string; name: string; kind: string; parent: string | null }>(
+      `/api/projects/${projectId}/screens`, { method: "POST", body: JSON.stringify({ name, kind, parent }) }),
+  // Mueve/reordena/convierte en modal (frontmatter).
+  setScreenMeta: (projectId: string, path: string, meta: { kind?: "pagina" | "modal"; parent?: string | null; order?: number }) =>
+    req<{ ok: boolean }>(`/api/projects/${projectId}/screens/meta`, { method: "POST", body: JSON.stringify({ path, ...meta }) }),
+  // Define TODAS las pantallas con IA (agente screen-planner).
+  defineScreens: (projectId: string) =>
+    req<{ ok: boolean; created: number; skipped: number; total: number }>(
+      `/api/projects/${projectId}/screens/define`, { method: "POST", body: JSON.stringify({}) }),
+  // Borra una pantalla (spec + maqueta) por el servicio único.
+  deleteScreen: (projectId: string, path: string) =>
+    req<{ ok: boolean }>(`/api/projects/${projectId}/screens?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
+  // ── Mapa de pantallas (fuente única de la estructura) ──
+  getScreenMap: (projectId: string) =>
+    req<{ tree: ScreenMapNode[]; status: Record<string, { hasScreen: boolean; mockupExists: boolean; stale: boolean; path: string }> }>(
+      `/api/projects/${projectId}/screens/map`),
+  saveScreenMap: (projectId: string, tree: ScreenMapNode[]) =>
+    req<{ ok: boolean; created: number; updated: number; orphans: string[] }>(
+      `/api/projects/${projectId}/screens/map`, { method: "POST", body: JSON.stringify({ tree }) }),
+  materializeScreens: (projectId: string) =>
+    req<{ ok: boolean; created: number; updated: number; orphans: string[] }>(
+      `/api/projects/${projectId}/screens/materialize`, { method: "POST", body: JSON.stringify({}) }),
 
   // Prompts API
   listPrompts: () => req<{ prompts: { name: string; isCustom: boolean }[] }>("/api/prompts"),

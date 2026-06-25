@@ -156,6 +156,72 @@ function buildKnowledgeTools(cfg: AppConfig, projectId: string): ChatTool[] {
         }
       },
     },
+    {
+      name: "listar_pantallas",
+      description:
+        "Lista TODAS las pantallas del proyecto con su jerarquía: cuáles son PÁGINAS y cuáles son MODALES " +
+        "(diálogos que se abren sobre una página, con su 'padre'). Llámalo AL EMPEZAR la UI: tienes que " +
+        "construirlas TODAS — las páginas como vistas/rutas (con su entrada de menú si aplica) y los modales " +
+        "como componentes de diálogo abiertos desde su página padre (NO como ruta ni entrada de menú).",
+      parameters: { type: "object", properties: {} },
+      run: async () => {
+        const { resolveProjectRoot } = await import("./mockup.js");
+        const { readScreenMeta, screenSlug } = await import("../screens/meta.js");
+        const rootPath = await resolveProjectRoot(projectId);
+        const dir = path.join(rootPath, "pantallas");
+        let names: string[] = [];
+        try {
+          names = (await fs.readdir(dir)).filter((n) => n.toLowerCase().endsWith(".md") && !n.toLowerCase().endsWith(".fuente.md"));
+        } catch {
+          return "(este proyecto aún no tiene pantallas definidas en pantallas/)";
+        }
+        const rows: string[] = [];
+        for (const name of names.sort()) {
+          const rel = `pantallas/${name}`;
+          let spec = "";
+          try { spec = await fs.readFile(path.join(dir, name), "utf-8"); } catch { /* sigue */ }
+          const meta = readScreenMeta(spec);
+          const hasMockup = await fs.access(path.resolve(rootPath, rel.replace(/\.md$/i, ".preview.html"))).then(() => true).catch(() => false);
+          rows.push(`- ${screenSlug(rel)} [${meta.kind}${meta.parent ? `, modal de ${meta.parent}` : ""}]${hasMockup ? " (con maqueta)" : ""}`);
+        }
+        return (
+          "Pantallas del proyecto. Constrúyelas TODAS; para cada una llama a `leer_maqueta` y reprodúcela " +
+          "fielmente. Los `modal` van como componente de diálogo de su página `padre`, no como ruta:\n" +
+          rows.join("\n")
+        );
+      },
+    },
+    {
+      name: "actualizar_maqueta",
+      description:
+        "Actualiza la MAQUETA (.preview.html) de una pantalla con el HTML que refleja lo que has construido. " +
+        "Llámalo SOLO si, por un requisito del código o de las reglas, has tenido que DESVIARTE de la maqueta " +
+        "original (mover/añadir/quitar algo): así la plantilla queda como reflejo fiel de lo que sale. Pásale " +
+        "la pantalla y el HTML completo del boceto ya actualizado (mismo estilo/paleta que la maqueta original).",
+      parameters: {
+        type: "object",
+        properties: {
+          pantalla: { type: "string", description: "Ruta o nombre, p.ej. pantallas/login.md o login" },
+          html: { type: "string", description: "HTML completo del boceto actualizado" },
+        },
+        required: ["pantalla", "html"],
+      },
+      run: async (a) => {
+        const { setMockupHtml } = await import("../screens/service.js");
+        let rel = String(a.pantalla ?? "").replace(/\\/g, "/").replace(/^\/+/, "").trim();
+        if (!rel) return "(indica la pantalla)";
+        if (rel.toLowerCase().endsWith(".preview.html")) rel = rel.replace(/\.preview\.html$/i, ".md");
+        if (!rel.toLowerCase().endsWith(".md")) rel = `${rel}.md`;
+        rel = `pantallas/${rel.replace(/^pantallas\//i, "")}`;
+        if (!String(a.html ?? "").trim()) return "(no me has pasado el HTML del boceto)";
+        try {
+          await setMockupHtml(projectId, rel, String(a.html));
+          return `Maqueta de ${rel} actualizada — queda como reflejo fiel de lo construido.`;
+        } catch (e: any) {
+          return `(no se pudo actualizar la maqueta: ${e?.message ?? e})`;
+        }
+      },
+    },
   ];
 }
 

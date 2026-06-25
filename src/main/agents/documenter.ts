@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { asc, eq } from "drizzle-orm";
-import type { AppConfig, AppType } from "@shared";
+import type { AppConfig } from "@shared";
 import { db, schema } from "../db/client.js";
 import { chat } from "../llm/client.js";
 import { loadPrompt } from "../prompts.js";
@@ -10,8 +10,8 @@ import { loadConfig } from "../config.js";
 import { log } from "../log.js";
 import { deleteProjectDocument, safeRelPath, saveProjectDocument } from "../papers/save.js";
 import { nextDocNumberInDir } from "../papers/numbering.js";
-import { getArchitecture } from "../architecture.js";
-import { ensureMockupForScreen, isScreenDoc } from "./mockup.js";
+import { isScreenDoc } from "./mockup.js";
+import { deleteScreen, saveScreenSpec } from "../screens/service.js";
 
 interface DocumenterInput {
   sessionId: string;
@@ -172,30 +172,28 @@ export const runDocumenter = {
     const ficheros = output.ficheros ?? [];
     console.log(`[documenter] apply runId=${runId} ficheros=${ficheros.length}`);
 
-    // Escritura/borrado vía el escritor compartido (disco + BD + Qdrant, con su guard de path).
-    let mockupAppType: AppType | null = null; // se deriva una sola vez, solo si hay pantallas
+    // Escritura/borrado vía los escritores compartidos (disco + BD + índice). Las PANTALLAS pasan
+    // SIEMPRE por el servicio único de pantallas (frontmatter + registro + maqueta auto), nunca a pelo.
     for (const f of ficheros) {
       if (!f.ruta) continue;
       try {
+        const esPantalla = isScreenDoc(f.ruta);
         if (f.accion === "delete") {
-          await deleteProjectDocument(cfg, projectId, f.ruta);
+          if (esPantalla) await deleteScreen(cfg, projectId, f.ruta);
+          else await deleteProjectDocument(cfg, projectId, f.ruta);
         } else if (f.contenido?.trim()) {
-          await saveProjectDocument(cfg, projectId, {
-            ruta: f.ruta,
-            contenido: f.contenido,
-            titulo: f.titulo,
-            tags: f.tags,
-            coleccion: f.coleccion,
-            agentRunId: runId,
-          });
-          // Auto-maqueta la 1ª vez que aparece una pantalla con contenido real (fire-and-forget:
-          // llama al LLM y no debe bloquear el apply; force:false → no-op si ya tiene boceto). El tipo de
-          // app fija la paleta del boceto (escritorio oscuro / web claro); se deriva una sola vez.
-          if (isScreenDoc(f.ruta)) {
-            if (mockupAppType === null) mockupAppType = (await getArchitecture(projectId))?.appType ?? "electron";
-            ensureMockupForScreen(cfg, projectId, f.ruta, { force: false, appType: mockupAppType }).catch((e) =>
-              log.warn("documenter", "auto-maqueta falló", { err: e, ruta: f.ruta }),
-            );
+          if (esPantalla) {
+            // Auto-maqueta solo si falta (mockup: "auto" → no regenera si ya hay boceto).
+            await saveScreenSpec(cfg, projectId, f.ruta, f.contenido, { mockup: "auto" });
+          } else {
+            await saveProjectDocument(cfg, projectId, {
+              ruta: f.ruta,
+              contenido: f.contenido,
+              titulo: f.titulo,
+              tags: f.tags,
+              coleccion: f.coleccion,
+              agentRunId: runId,
+            });
           }
         }
       } catch (e) {

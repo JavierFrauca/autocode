@@ -6,6 +6,7 @@ import ProjectsView from "./views/ProjectsView.vue";
 import ProjectView from "./views/ProjectView.vue";
 import ChatView from "./views/ChatView.vue";
 import DocsView from "./views/DocsView.vue";
+import ScreensView from "./views/ScreensView.vue";
 import GenerateAppView from "./views/GenerateAppView.vue";
 import SettingsView from "./views/SettingsView.vue";
 import AgentsView from "./views/AgentsView.vue";
@@ -25,6 +26,7 @@ export function mountApp(selector: string, apiBase: string): void {
           { path: "", redirect: (to: any) => `/projects/${to.params.projectId}/chat` },
           { path: "chat", component: ChatView },
           { path: "docs", component: DocsView },
+          { path: "screens", component: ScreensView },
           { path: "app",  component: GenerateAppView },
           { path: "agents", component: AgentsView },
         ],

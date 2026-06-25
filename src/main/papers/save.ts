@@ -7,6 +7,7 @@ import { db, schema } from "../db/client.js";
 import { ingestRevision } from "./ingest.js";
 import { nucleusDeleteDoc } from "../nucleus/client.js";
 import { projectDomain } from "../nucleus/domains.js";
+import { ensureScreenFrontmatter, isScreenSpecPath } from "../screens/meta.js";
 import { log } from "../log.js";
 
 /**
@@ -57,8 +58,10 @@ export async function saveProjectDocument(
   const ruta = safeRelPath(input.ruta ?? "");
   if (!ruta) throw new Error("ruta vacía o inválida");
   if (!ruta.endsWith(".md")) throw new Error("la ruta debe terminar en .md");
-  const contenido = input.contenido ?? "";
+  let contenido = input.contenido ?? "";
   if (!contenido.trim()) throw new Error("contenido vacío");
+  // Toda pantalla, venga de donde venga, queda con frontmatter de jerarquía (suelo de consistencia).
+  if (isScreenSpecPath(ruta)) contenido = ensureScreenFrontmatter(contenido);
 
   // Anti path-traversal: el fichero debe quedar dentro de la carpeta del proyecto.
   const rootNorm = path.resolve(project.rootPath).toLowerCase();

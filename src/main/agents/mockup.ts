@@ -21,10 +21,12 @@ const MOCKUP_MAX_TOKENS = 6000;
 // se salta este guard de todos modos.
 const MIN_SPEC_CHARS = 40;
 
-/** ¿Es un documento de pantalla (`pantallas/*.md`)? */
+/** ¿Es un documento de pantalla (`pantallas/*.md`)? Los `_*` (p.ej. `_mapa.md`) NO son pantallas. */
 export function isScreenDoc(relPath: string): boolean {
   const p = relPath.replace(/\\/g, "/").replace(/^\/+/, "");
-  return p.startsWith(`${SCREEN_DIR}/`) && p.toLowerCase().endsWith(".md");
+  if (!p.startsWith(`${SCREEN_DIR}/`) || !p.toLowerCase().endsWith(".md")) return false;
+  const base = p.split("/").pop() ?? "";
+  return !base.startsWith("_") && !base.toLowerCase().endsWith(".fuente.md");
 }
 
 /** Ruta del sibling de maqueta: `pantallas/x.md` → `pantallas/x.preview.html`. */

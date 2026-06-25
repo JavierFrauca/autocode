@@ -8,40 +8,11 @@ import { loadConfig } from "../config.js";
 import { ingestRevision } from "../papers/ingest.js";
 import { searchDocuments } from "../tools/knowledge.js";
 import { getArchitecture } from "../architecture.js";
-import { ensureMockupForScreen, isMockupStale, isScreenDoc, mockupPathFor } from "../agents/mockup.js";
+import { isMockupStale, isScreenDoc, mockupPathFor } from "../agents/mockup.js";
 import { nucleusDeleteDoc } from "../nucleus/client.js";
 import { projectDomain } from "../nucleus/domains.js";
-import { chat } from "../llm/client.js";
-import { saveProjectDocument } from "../papers/save.js";
-import type { AppConfig } from "@shared";
-
-/** Quita vallas ```markdown … ``` si el modelo las añade. */
-function stripMdFence(raw: string): string {
-  const s = (raw ?? "").trim();
-  const m = s.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i);
-  return (m?.[1] ?? s).trim();
-}
-
-/** Aplica con IA un cambio en lenguaje natural sobre la especificación (Markdown) de una pantalla. */
-async function editSpecWithAi(cfg: AppConfig, spec: string, instruction: string): Promise<string> {
-  const messages = [
-    {
-      role: "system" as const,
-      content:
-        "Eres un editor de especificaciones de pantalla en Markdown. Aplica EXACTAMENTE el cambio que " +
-        "pide el usuario sobre la especificación dada, conservando el resto del contenido, el estilo y la " +
-        "estructura. No añadas comentarios ni explicaciones. Devuelve SOLO el Markdown completo ya actualizado.",
-    },
-    {
-      role: "user" as const,
-      content:
-        `Especificación actual:\n\n${spec}\n\nCambio a aplicar:\n"${instruction}"\n\n` +
-        "Devuelve la especificación completa ya modificada (solo Markdown, sin vallas de código).",
-    },
-  ];
-  const res = await chat(cfg, "chat", messages, { temperature: 0.2, maxTokens: 4000 }, "screen-modify");
-  return stripMdFence(res.content);
-}
+import { defineScreens } from "../agents/screen-planner.js";
+import * as screens from "../screens/service.js";
 
 async function getProject(projectId: string) {
   const rows = await db().select().from(schema.projects).where(eq(schema.projects.id, projectId));
@@ -107,24 +78,20 @@ export async function registerFilesRoutes(app: FastifyInstance): Promise<void> {
     const abs = path.resolve(project.rootPath, body.path);
     if (!abs.startsWith(project.rootPath)) return reply.code(400).send({ error: "invalid path" });
 
+    // Las PANTALLAS pasan SIEMPRE por el servicio único (frontmatter + registro + maqueta). El resto,
+    // escritura genérica (disco + re-ingest).
+    if (isScreenDoc(body.path)) {
+      const cfg = await loadConfig();
+      try { await screens.saveScreenSpec(cfg, id, body.path, body.content, { mockup: "auto" }); }
+      catch (e: any) { return reply.code(500).send({ error: e?.message ?? String(e) }); }
+      return { ok: true, path: body.path };
+    }
+
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, body.content, "utf-8");
-
-    // Re-ingest to Qdrant (fire-and-forget with error logging)
     ingestFile(id, project, body.path, body.content).catch((e) =>
-      app.log.warn(e, `ingest failed for ${body.path}`)
+      app.log.warn(e, `ingest failed for ${body.path}`),
     );
-
-    // Auto-maqueta la 1ª vez: si es una pantalla con contenido real y aún no tiene boceto, lo
-    // genera en segundo plano (force:false → no-op si ya existe o el spec es un stub).
-    if (isScreenDoc(body.path)) {
-      loadConfig()
-        .then(async (cfg) => {
-          const appType = (await getArchitecture(id))?.appType ?? "electron";
-          return ensureMockupForScreen(cfg, id, body.path, { force: false, appType });
-        })
-        .catch((e) => app.log.warn(e, `auto-mockup failed for ${body.path}`));
-    }
 
     return { ok: true, path: body.path };
   });
@@ -147,90 +114,129 @@ export async function registerFilesRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  // POST /api/projects/:id/screens/mockup { path, instruction? } — (re)genera la maqueta (botón del
-  // usuario). Con `instruction` ("modificar con IA") modifica el boceto actual según lo que pida.
+  // Todas las rutas de pantallas pasan por el SERVICIO único (screens/service.ts): una sola forma de
+  // crear/guardar/mover/borrar/regenerar (spec con frontmatter vía saveProjectDocument + maqueta).
+
+  // POST /api/projects/:id/screens/mockup { path } — regenera la maqueta desde el spec actual.
   app.post("/api/projects/:id/screens/mockup", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const { path: relPath, instruction } = (req.body ?? {}) as { path?: string; instruction?: string };
-    if (!relPath) return reply.code(400).send({ error: "path required" });
-    if (!isScreenDoc(relPath)) return reply.code(400).send({ error: "no es una pantalla" });
-    const project = await getProject(id).catch(() => null);
-    if (!project) return reply.code(404).send({ error: "not found" });
+    const { path: relPath } = (req.body ?? {}) as { path?: string };
+    if (!relPath || !isScreenDoc(relPath)) return reply.code(400).send({ error: "no es una pantalla" });
+    if (!(await getProject(id).catch(() => null))) return reply.code(404).send({ error: "not found" });
     const cfg = await loadConfig();
-    const appType = (await getArchitecture(id))?.appType ?? "electron";
-    const r = await ensureMockupForScreen(cfg, id, relPath, { force: true, appType, instruction });
-    if (r.status !== "generated") {
-      return reply.code(500).send({ error: "no se pudo generar la maqueta" });
-    }
-    const abs = path.resolve(project.rootPath, r.path!);
-    const html = await fs.readFile(abs, "utf-8").catch(() => null);
-    return { ok: true, html };
+    try {
+      const r = await screens.regenerateMockup(cfg, id, relPath);
+      return { ok: true, html: r.html };
+    } catch (e: any) { return reply.code(500).send({ error: e?.message ?? String(e) }); }
   });
 
-  // POST /api/projects/:id/screens/modify { path, instruction } — "Modificar con IA" coherente: aplica
-  // el cambio al SPEC (.md, fuente de verdad) y regenera la maqueta desde el spec ya actualizado.
+  // POST /api/projects/:id/screens/modify { path, instruction } — "Modificar con IA" coherente (spec + maqueta).
   app.post("/api/projects/:id/screens/modify", async (req, reply) => {
     const { id } = req.params as { id: string };
     const { path: relPath, instruction } = (req.body ?? {}) as { path?: string; instruction?: string };
-    if (!relPath || !instruction?.trim()) return reply.code(400).send({ error: "path e instruction requeridos" });
-    if (!isScreenDoc(relPath)) return reply.code(400).send({ error: "no es una pantalla" });
-    const project = await getProject(id).catch(() => null);
-    if (!project) return reply.code(404).send({ error: "not found" });
-    const abs = path.resolve(project.rootPath, relPath);
-    if (!abs.startsWith(project.rootPath)) return reply.code(400).send({ error: "invalid path" });
-    const spec = await fs.readFile(abs, "utf-8").catch(() => null);
-    if (spec === null) return reply.code(404).send({ error: "spec no encontrado" });
-
+    if (!relPath || !instruction?.trim() || !isScreenDoc(relPath)) return reply.code(400).send({ error: "path e instruction requeridos" });
+    if (!(await getProject(id).catch(() => null))) return reply.code(404).send({ error: "not found" });
     const cfg = await loadConfig();
-    let newSpec: string;
     try {
-      newSpec = await editSpecWithAi(cfg, spec, instruction.trim());
-    } catch (e: any) {
-      return reply.code(500).send({ error: `la IA no pudo editar la especificación: ${e?.message ?? e}` });
-    }
-    if (!newSpec.trim()) return reply.code(500).send({ error: "la IA devolvió una especificación vacía" });
-
-    // Guarda el spec por el camino canónico (disco + tabla documents + revisión + reindex en Nucleus).
-    await saveProjectDocument(cfg, id, { ruta: relPath, contenido: newSpec });
-    // Regenera el boceto desde el spec ya actualizado.
-    const appType = (await getArchitecture(id))?.appType ?? "electron";
-    const r = await ensureMockupForScreen(cfg, id, relPath, { force: true, appType });
-    const html = r.status === "generated"
-      ? await fs.readFile(path.resolve(project.rootPath, r.path!), "utf-8").catch(() => null)
-      : null;
-    return { ok: true, spec: newSpec, html };
+      const r = await screens.modifyScreenWithAi(cfg, id, relPath, instruction);
+      return { ok: true, spec: r.spec, html: r.html };
+    } catch (e: any) { return reply.code(500).send({ error: e?.message ?? String(e) }); }
   });
 
-  // GET /api/projects/:id/screens — todas las pantallas con su maqueta (para la galería viva).
+  // GET /api/projects/:id/screens — todas las pantallas con su jerarquía y su maqueta.
   app.get("/api/projects/:id/screens", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await getProject(id).catch(() => null))) return reply.code(404).send({ error: "not found" });
+    return screens.listScreens(id);
+  });
+
+  // POST /api/projects/:id/screens { name, kind?, parent? } — crea una pantalla (página o modal de otra).
+  app.post("/api/projects/:id/screens", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { name?: string; kind?: "pagina" | "modal"; parent?: string | null };
+    if (!body.name?.trim()) return reply.code(400).send({ error: "name requerido" });
+    if (!(await getProject(id).catch(() => null))) return reply.code(404).send({ error: "not found" });
+    const cfg = await loadConfig();
+    try {
+      const r = await screens.createScreen(cfg, id, { name: body.name, kind: body.kind, parent: body.parent });
+      return { ok: true, ...r };
+    } catch (e: any) { return reply.code(409).send({ error: e?.message ?? String(e) }); }
+  });
+
+  // POST /api/projects/:id/screens/meta { path, kind?, parent?, order? } — mover/reordenar/convertir en modal.
+  app.post("/api/projects/:id/screens/meta", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { path?: string; kind?: "pagina" | "modal"; parent?: string | null; order?: number };
+    if (!body.path || !isScreenDoc(body.path)) return reply.code(400).send({ error: "pantalla inválida" });
+    if (!(await getProject(id).catch(() => null))) return reply.code(404).send({ error: "not found" });
+    const cfg = await loadConfig();
+    try {
+      await screens.setScreenMeta(cfg, id, body.path, {
+        ...(body.kind !== undefined ? { kind: body.kind === "modal" ? "modal" : "pagina" } : {}),
+        ...(body.parent !== undefined ? { parent: body.parent || null } : {}),
+        ...(body.order !== undefined ? { order: Number(body.order) } : {}),
+      });
+      return { ok: true };
+    } catch (e: any) { return reply.code(500).send({ error: e?.message ?? String(e) }); }
+  });
+
+  // DELETE /api/projects/:id/screens?path=pantallas/x.md — borra spec + maqueta (vía servicio).
+  app.delete("/api/projects/:id/screens", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { path: relPath } = req.query as { path?: string };
+    if (!relPath || !isScreenDoc(relPath)) return reply.code(400).send({ error: "pantalla inválida" });
+    if (!(await getProject(id).catch(() => null))) return reply.code(404).send({ error: "not found" });
+    const cfg = await loadConfig();
+    await screens.deleteScreen(cfg, id, relPath);
+    return { ok: true };
+  });
+
+  // GET /api/projects/:id/screens/map — árbol del MAPA (fuente de la estructura) + estado de cada nodo.
+  app.get("/api/projects/:id/screens/map", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await getProject(id).catch(() => null))) return reply.code(404).send({ error: "not found" });
+    return screens.mapWithStatus(id);
+  });
+
+  // POST /api/projects/:id/screens/map { tree } — guarda el árbol editado (escribe el mapa + materializa,
+  // creando las nuevas y borrando las huérfanas que ya no están en el árbol).
+  app.post("/api/projects/:id/screens/map", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { tree } = (req.body ?? {}) as { tree?: any[] };
+    if (!Array.isArray(tree)) return reply.code(400).send({ error: "tree requerido" });
+    if (!(await getProject(id).catch(() => null))) return reply.code(404).send({ error: "not found" });
+    const cfg = await loadConfig();
+    try {
+      const r = await screens.saveMap(cfg, id, tree as any);
+      return { ok: true, ...r };
+    } catch (e: any) { return reply.code(500).send({ error: e?.message ?? String(e) }); }
+  });
+
+  // POST /api/projects/:id/screens/materialize — vuelve a sincronizar las pantallas con el mapa.
+  app.post("/api/projects/:id/screens/materialize", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await getProject(id).catch(() => null))) return reply.code(404).send({ error: "not found" });
+    const cfg = await loadConfig();
+    try {
+      const r = await screens.materializeMap(cfg, id, { deleteOrphans: false });
+      return { ok: true, ...r };
+    } catch (e: any) { return reply.code(500).send({ error: e?.message ?? String(e) }); }
+  });
+
+  // POST /api/projects/:id/screens/define — agente que enumera TODAS las pantallas (con jerarquía) y
+  // crea sus specs + el MAPA; las maquetas se generan en segundo plano.
+  app.post("/api/projects/:id/screens/define", async (req, reply) => {
     const { id } = req.params as { id: string };
     const project = await getProject(id).catch(() => null);
     if (!project) return reply.code(404).send({ error: "not found" });
-    const dir = path.join(project.rootPath, "pantallas");
-    let names: string[] = [];
+    const cfg = await loadConfig();
+    const appType = (await getArchitecture(id))?.appType ?? "electron";
     try {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      names = entries
-        .filter((e) => e.isFile() && e.name.toLowerCase().endsWith(".md") && !e.name.toLowerCase().endsWith(".fuente.md"))
-        .map((e) => e.name)
-        .sort((a, b) => a.localeCompare(b));
-    } catch {
-      return { screens: [] }; // aún no hay carpeta de pantallas
+      const r = await defineScreens(cfg, id, appType);
+      return { ok: true, ...r };
+    } catch (e: any) {
+      return reply.code(500).send({ error: e?.message ?? String(e) });
     }
-    const screens = await Promise.all(names.map(async (name) => {
-      const relPath = `pantallas/${name}`;
-      const htmlAbs = path.resolve(project.rootPath, mockupPathFor(relPath));
-      const html = await fs.readFile(htmlAbs, "utf-8").catch(() => null);
-      const stale = html ? await isMockupStale(project.rootPath, relPath) : false;
-      return {
-        path: relPath,
-        name: name.replace(/\.md$/i, "").replace(/-/g, " "),
-        mockupExists: !!html,
-        stale,
-        html,
-      };
-    }));
-    return { screens };
   });
 
   // POST /api/projects/:id/files/search — búsqueda semántica via Qdrant

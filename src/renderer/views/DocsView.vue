@@ -6,9 +6,8 @@ import { renderMarkdown } from "../md";
 import { useDialog } from "../composables/useDialog";
 import {
   Folder, FolderOpen, FileText, Pencil, Trash2, Plus,
-  X as IconX, Search, ChevronRight, ChevronDown, Sparkles, RotateCcw, History, LayoutGrid, Wand2,
+  X as IconX, Search, ChevronRight, ChevronDown, Sparkles, RotateCcw, History, Wand2,
 } from "lucide-vue-next";
-import ScreenGallery from "../components/ScreenGallery.vue";
 
 const route = useRoute();
 const projectId = computed(() => route.params.projectId as string);
@@ -41,7 +40,6 @@ const isDirty = computed(() => content.value !== originalContent.value);
 
 const CATEGORIES: { value: string; label: string }[] = [
   { value: "reglas",    label: "Regla de negocio" },
-  { value: "pantallas", label: "Pantalla / vista" },
   { value: "dominios",  label: "Dominio / entidad" },
   { value: "procesos",  label: "Proceso" },
 ];
@@ -50,7 +48,8 @@ async function loadTree() {
   loading.value = true;
   try {
     const r = await api.projectFiles(projectId.value);
-    tree.value = r.tree ?? [];
+    // Las pantallas tienen su propia sección ("Pantallas"); aquí Documentos = solo documentos.
+    tree.value = (r.tree ?? []).filter((n: any) => n.path !== "pantallas");
   } finally {
     loading.value = false;
   }
@@ -287,13 +286,6 @@ async function modifyMockupWithAi() {
   }
 }
 
-// ── Galería de pantallas ──────────────────────────────────────────────────────
-const galleryMode = ref(false);
-async function onGalleryOpen(path: string) {
-  galleryMode.value = false;
-  await openFile(path);
-  setViewMode("mockup");
-}
 
 // ── Historial de revisiones ───────────────────────────────────────────────────
 const showHistory = ref(false);
@@ -372,10 +364,6 @@ watch(projectId, loadTree);
         </button>
       </div>
 
-      <!-- Acceso a la galería viva de pantallas -->
-      <button class="gallery-toggle" :class="{ active: galleryMode }" @click="galleryMode = !galleryMode">
-        <LayoutGrid :size="13" :stroke-width="2" /> Galería de pantallas
-      </button>
 
       <!-- Formulario de nuevo documento -->
       <div v-if="showNewForm" class="new-doc-form">
@@ -460,10 +448,7 @@ watch(projectId, loadTree);
 
     <!-- ── Visor / editor ── -->
     <div class="docs-content">
-      <!-- Galería viva de pantallas (rejilla de bocetos + modificar con IA) -->
-      <ScreenGallery v-if="galleryMode" :project-id="projectId" @open="onGalleryOpen" />
-
-      <template v-else-if="selectedPath">
+      <template v-if="selectedPath">
         <div class="doc-toolbar">
           <div class="doc-breadcrumb">
             <span class="dim">{{ selectedPath.split('/').slice(0, -1).join(' / ') }}</span>
