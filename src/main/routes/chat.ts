@@ -177,15 +177,52 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       }
 
       // 4) Respuesta del modelo en streaming.
-      for await (const chunk of chatStream(cfg, "chat", llmMessages, {}, "chat")) {
+      // Empujón anti-fuga: la fase de respuesta NO lleva tools, pero algunos modelos (DeepSeek y
+      // derivados), al ver el historial de tool-calls, siguen emitiéndolas como TEXTO. Le pedimos prosa.
+      const streamMessages: ChatMessage[] = [
+        ...llmMessages,
+        {
+          role: "system",
+          content:
+            "Ahora RESPONDE al usuario en lenguaje natural, claro y conciso. Ya has usado las herramientas " +
+            "que necesitabas: NO escribas más llamadas a herramientas, ni JSON de tool-calls, ni etiquetas " +
+            "tipo <｜tool…｜>, ｜｜DSML｜｜ o <invoke…> en tu respuesta.",
+        },
+      ];
+      // Saneador en streaming: si aparece sintaxis de tool-call emitida como texto, CORTAMOS ahí (la prosa
+      // previa, que sí es para el usuario, se conserva). El `GUARD` evita enviar un marcador partido entre
+      // deltas. ｜ = ｜ (barra ancha de DeepSeek), ▁ = ▁.
+      const TOOLCALL_RE = /｜｜|<｜|<\s*tool_calls?\b|<\s*invoke\s+name|▁tool▁call/i;
+      let sent = 0;
+      let cut = false;
+      const GUARD = 12;
+      for await (const chunk of chatStream(cfg, "chat", streamMessages, {}, "chat")) {
         if (closed) break;
         if ("delta" in chunk) {
           full += chunk.delta;
-          send("delta", { text: chunk.delta });
+          const mi = full.search(TOOLCALL_RE);
+          if (mi >= 0) {
+            const clean = full.slice(0, mi).replace(/\s+$/, "");
+            if (clean.length > sent) send("delta", { text: clean.slice(sent) });
+            full = clean;
+            cut = true;
+            break;
+          }
+          const upto = Math.max(sent, full.length - GUARD);
+          if (upto > sent) { send("delta", { text: full.slice(sent, upto) }); sent = upto; }
         } else {
           model = chunk.done.model;
           tokensIn = chunk.done.tokensIn;
           tokensOut = chunk.done.tokensOut;
+        }
+      }
+      if (!cut && full.length > sent) send("delta", { text: full.slice(sent) });
+      if (cut) {
+        log.warn("chat", "respuesta recortada: el modelo emitió sintaxis de tool-call como texto");
+        // Si SOLO emitió basura (sin prosa útil), guiamos al usuario al sitio correcto para crear pantallas.
+        if (!full.trim()) {
+          full = "Para crear varias pantallas a la vez, hazlo desde la sección **Pantallas** con **«Generar mapa con IA»** — ahí se generan todas con orden. Si prefieres, dime una pantalla concreta y la definimos.";
+          send("delta", { text: full });
         }
       }
     } catch (e: any) {

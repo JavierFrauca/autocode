@@ -114,6 +114,8 @@ export async function saveScreenSpec(
 export async function setScreenMeta(cfg: AppConfig, projectId: string, relPath: string, meta: { kind?: ScreenKind; parent?: string | null; order?: number }): Promise<void> {
   const rootPath = await resolveProjectRoot(projectId);
   const spec = await fs.readFile(path.resolve(rootPath, relPath), "utf-8");
+  // Solo cambia el frontmatter (no el cuerpo) → la maqueta sigue vigente. La "desactualización" se mide
+  // por la huella del CUERPO embebida en la maqueta (ver mockup.isMockupStale), no por fechas.
   await saveProjectDocument(cfg, projectId, { ruta: relPath, contenido: writeScreenMeta(spec, meta) });
 }
 
@@ -199,23 +201,25 @@ export async function writeMap(cfg: AppConfig, projectId: string, nodes: MapNode
 
 export interface MaterializeResult { created: number; updated: number; orphans: string[] }
 
-/** Materializa el mapa → pantallas: crea las que falten (stub), estampa jerarquía a todas desde el mapa
- *  y, opcionalmente, borra las pantallas huérfanas (las que ya no están en el mapa). */
+/** Materializa el mapa → pantallas (ESTRUCTURAL, sin maquetas): crea las que falten (stub), estampa la
+ *  jerarquía a todas desde el mapa y, opcionalmente, borra las huérfanas (las que ya no están en el mapa).
+ *  Las maquetas se generan aparte con `generateAllMockups` (acción "Generar todas las maquetas"). */
 export async function materializeMap(cfg: AppConfig, projectId: string, opts: { deleteOrphans?: boolean } = {}): Promise<MaterializeResult> {
   const flat = flattenMap(await readMap(projectId));
   const { screens } = await listScreens(projectId);
   const bySlug = new Map(screens.map((s) => [s.slug, s]));
   let created = 0;
   let updated = 0;
-  const newPaths: string[] = [];
   for (const f of flat) {
     const existing = bySlug.get(f.slug);
     if (existing) {
-      await setScreenMeta(cfg, projectId, existing.path, { kind: f.kind, parent: f.parent, order: f.order });
-      updated++;
+      // Solo reescribe si la jerarquía cambió de verdad (evita churn y falsos "desactualizada").
+      if (existing.kind !== f.kind || existing.parent !== f.parent || existing.order !== f.order) {
+        await setScreenMeta(cfg, projectId, existing.path, { kind: f.kind, parent: f.parent, order: f.order });
+        updated++;
+      }
     } else {
-      const r = await createScreen(cfg, projectId, { name: f.name, kind: f.kind, parent: f.parent, order: f.order });
-      newPaths.push(r.path);
+      await createScreen(cfg, projectId, { name: f.name, kind: f.kind, parent: f.parent, order: f.order });
       created++;
     }
   }
@@ -224,9 +228,19 @@ export async function materializeMap(cfg: AppConfig, projectId: string, opts: { 
   if (opts.deleteOrphans) {
     for (const s of orphanScreens) { try { await deleteScreen(cfg, projectId, s.path); } catch { /* sigue */ } }
   }
-  // Maquetas de las nuevas en segundo plano (el árbol ya está; los bocetos se pueblan solos).
-  void (async () => { for (const rel of newPaths) { try { await regenerateMockup(cfg, projectId, rel); } catch { /* */ } } })();
   return { created, updated, orphans: orphanScreens.map((s) => s.path) };
+}
+
+/** "Generar todas las maquetas": materializa el mapa y genera (en 2º plano) la maqueta de CADA pantalla
+ *  que aún no la tenga. Una sola acción → todas las pantallas dibujadas, también las que faltaban. */
+export async function generateAllMockups(cfg: AppConfig, projectId: string): Promise<{ total: number; generating: number }> {
+  await materializeMap(cfg, projectId, { deleteOrphans: false });
+  const { screens } = await listScreens(projectId);
+  const missing = screens.filter((s) => !s.mockupExists);
+  void (async () => {
+    for (const s of missing) { try { await regenerateMockup(cfg, projectId, s.path); } catch { /* sigue con la siguiente */ } }
+  })();
+  return { total: screens.length, generating: missing.length };
 }
 
 /** Guarda un árbol editado en la UI: escribe el mapa y materializa (borrando huérfanas). */

@@ -12,6 +12,7 @@ import {
   isScreenDoc,
   mockupPathFor,
   paletteBlock,
+  specBodyHash,
   stripHtmlFences,
   type MockupDeps,
 } from "../agents/mockup.js";
@@ -142,7 +143,8 @@ describe("ensureMockupForScreen", () => {
     expect(r.path).toBe("pantallas/login.preview.html");
     expect(calls).toBe(1);
     const html = await fs.readFile(path.join(ws, "pantallas/login.preview.html"), "utf-8");
-    expect(html).toBe(HTML);
+    expect(html).toContain(HTML);
+    expect(html).toContain("spec-hash:"); // lleva la huella del cuerpo embebida
   });
 
   it("skip (auto) si la maqueta ya existe — no llama al LLM", async () => {
@@ -162,7 +164,7 @@ describe("ensureMockupForScreen", () => {
     expect(r.status).toBe("generated");
     expect(calls).toBe(1);
     const html = await fs.readFile(path.join(ws, "pantallas/login.preview.html"), "utf-8");
-    expect(html).toBe(HTML);
+    expect(html).toContain(HTML);
   });
 
   it("skip (auto) si el spec es un stub sin contenido", async () => {
@@ -175,17 +177,22 @@ describe("ensureMockupForScreen", () => {
 });
 
 describe("isMockupStale", () => {
-  it("true cuando el spec es más nuevo que la maqueta", async () => {
-    await writeScreen("pantallas/login.preview.html", HTML);
-    await new Promise((r) => setTimeout(r, 10));
-    await writeScreen("pantallas/login.md", SPEC); // md escrito después → más nuevo
+  it("true cuando el CUERPO del spec cambió respecto a la huella de la maqueta", async () => {
+    // maqueta generada para un cuerpo viejo (huella embebida de ese cuerpo)
+    await writeScreen("pantallas/login.preview.html", `${HTML}\n<!-- spec-hash: ${specBodyHash("# Login\n\ncuerpo viejo")} -->\n`);
+    await writeScreen("pantallas/login.md", "# Login\n\nCUERPO nuevo y distinto");
     expect(await isMockupStale(ws, "pantallas/login.md")).toBe(true);
   });
 
-  it("false cuando la maqueta es igual o más nueva", async () => {
+  it("false cuando la huella coincide con el cuerpo actual", async () => {
     await writeScreen("pantallas/login.md", SPEC);
-    await new Promise((r) => setTimeout(r, 10));
-    await writeScreen("pantallas/login.preview.html", HTML);
+    await writeScreen("pantallas/login.preview.html", `${HTML}\n<!-- spec-hash: ${specBodyHash(SPEC)} -->\n`);
+    expect(await isMockupStale(ws, "pantallas/login.md")).toBe(false);
+  });
+
+  it("false si la maqueta no lleva huella (antigua o write-back del builder)", async () => {
+    await writeScreen("pantallas/login.md", SPEC);
+    await writeScreen("pantallas/login.preview.html", HTML); // sin spec-hash
     expect(await isMockupStale(ws, "pantallas/login.md")).toBe(false);
   });
 

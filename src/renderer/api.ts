@@ -120,9 +120,10 @@ export const api = {
   saveScreenMap: (projectId: string, tree: ScreenMapNode[]) =>
     req<{ ok: boolean; created: number; updated: number; orphans: string[] }>(
       `/api/projects/${projectId}/screens/map`, { method: "POST", body: JSON.stringify({ tree }) }),
-  materializeScreens: (projectId: string) =>
-    req<{ ok: boolean; created: number; updated: number; orphans: string[] }>(
-      `/api/projects/${projectId}/screens/materialize`, { method: "POST", body: JSON.stringify({}) }),
+  // "Generar todas las maquetas": materializa + genera las maquetas que falten (en 2º plano).
+  generateAllScreens: (projectId: string) =>
+    req<{ ok: boolean; total: number; generating: number }>(
+      `/api/projects/${projectId}/screens/generate-all`, { method: "POST", body: JSON.stringify({}) }),
 
   // Prompts API
   listPrompts: () => req<{ prompts: { name: string; isCustom: boolean }[] }>("/api/prompts"),

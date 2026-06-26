@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { api, type ScreenMapNode } from "../api";
 import { renderMarkdown } from "../md";
 import {
-  Sparkles, Plus, AppWindow, Monitor, Wand2, RefreshCw, Trash2, Loader2, ImageOff, FileText, ArrowRightLeft, GitMerge,
+  Sparkles, Plus, AppWindow, Monitor, Wand2, RefreshCw, Trash2, Loader2, ImageOff, FileText, ArrowRightLeft, Images,
 } from "lucide-vue-next";
 
 interface NodeStatus { hasScreen: boolean; mockupExists: boolean; stale: boolean; path: string }
@@ -18,8 +18,9 @@ const loading = ref(true);
 const error = ref<string | null>(null);
 const selectedSlug = ref<string | null>(null);
 const defining = ref(false);
-const materializing = ref(false);
+const generatingAll = ref(false);
 const saving = ref(false);
+let pollTimer: any = null;
 
 function slugify(s: string): string {
   return s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")
@@ -138,20 +139,46 @@ async function setHierarchy(node: ScreenMapNode, kind: "pagina" | "modal", paren
   await saveTree();
 }
 
-// ── Acciones de IA ────────────────────────────────────────────────────────────
+// ── Acciones ──────────────────────────────────────────────────────────────────
+// Pantallas materializadas que aún no tienen maqueta (se están "dibujando").
+function pendingMockups(): number {
+  return Object.values(status.value).filter((s) => s.hasScreen && !s.mockupExists).length;
+}
+// Sondea hasta que todas las maquetas se han poblado (las genera el servidor en 2º plano).
+function startPoll() {
+  clearInterval(pollTimer);
+  let ticks = 0;
+  pollTimer = setInterval(async () => {
+    ticks++;
+    await load();
+    if (pendingMockups() === 0 || ticks > 40) { clearInterval(pollTimer); generatingAll.value = false; }
+  }, 3000);
+}
+
+// "Generar mapa con IA": la IA crea el árbol + las pantallas (y sus maquetas en 2º plano).
 async function defineAll() {
   if (defining.value) return;
   defining.value = true; error.value = null;
-  try { await api.defineScreens(projectId.value); await load(); }
-  catch (e: any) { error.value = `No se pudo generar el mapa: ${e?.message ?? e}`; }
+  try {
+    await api.defineScreens(projectId.value);
+    await load();
+    if (pendingMockups() > 0) { generatingAll.value = true; startPoll(); }
+  } catch (e: any) { error.value = `No se pudo generar el mapa: ${e?.message ?? e}`; }
   finally { defining.value = false; }
 }
-async function materialize() {
-  if (materializing.value) return;
-  materializing.value = true; error.value = null;
-  try { await api.materializeScreens(projectId.value); await load(); }
-  catch (e: any) { error.value = `No se pudo materializar: ${e?.message ?? e}`; }
-  finally { materializing.value = false; }
+
+// "Generar todas las maquetas": crea las pantallas que falten y genera TODAS las maquetas pendientes.
+async function generateAll() {
+  if (generatingAll.value) return;
+  generatingAll.value = true; error.value = null;
+  try {
+    await api.generateAllScreens(projectId.value);
+    await load();
+    if (pendingMockups() > 0) startPoll(); else generatingAll.value = false;
+  } catch (e: any) {
+    error.value = `No se pudieron generar las maquetas: ${e?.message ?? e}`;
+    generatingAll.value = false;
+  }
 }
 
 // ── Preview de la pantalla seleccionada ───────────────────────────────────────
@@ -203,6 +230,7 @@ async function applyModify() {
 }
 
 onMounted(load);
+onBeforeUnmount(() => clearInterval(pollTimer));
 watch(projectId, () => { selectedSlug.value = null; load(); });
 </script>
 
@@ -216,10 +244,10 @@ watch(projectId, () => { selectedSlug.value = null; load(); });
           <Sparkles v-else :size="14" :stroke-width="2" />
           {{ defining ? "Generando…" : "Generar mapa con IA" }}
         </button>
-        <button class="btn-mat" :disabled="materializing || tree.length === 0" title="Crear/sincronizar las pantallas con el mapa" @click="materialize">
-          <Loader2 v-if="materializing" class="spin" :size="13" :stroke-width="2" />
-          <GitMerge v-else :size="13" :stroke-width="2" />
-          {{ materializing ? "Materializando…" : "Materializar" }}
+        <button class="btn-mat" :disabled="generatingAll || tree.length === 0" title="Crea las pantallas que falten y dibuja todas las maquetas pendientes" @click="generateAll">
+          <Loader2 v-if="generatingAll" class="spin" :size="13" :stroke-width="2" />
+          <Images v-else :size="13" :stroke-width="2" />
+          {{ generatingAll ? "Generando…" : "Generar todas las maquetas" }}
         </button>
       </div>
       <div class="screens-tree-head">
@@ -276,8 +304,8 @@ watch(projectId, () => { selectedSlug.value = null; load(); });
           <div class="detail-empty">
             <ImageOff :size="40" :stroke-width="1.3" style="opacity:.3" />
             <h3>{{ selected.name }}</h3>
-            <p class="muted">Está en el mapa pero aún no se ha creado la pantalla. Materializa para generarla.</p>
-            <button class="btn-soft accent" :disabled="materializing" @click="materialize"><GitMerge :size="14" :stroke-width="2" /> Materializar pantallas</button>
+            <p class="muted">Está en el mapa pero su maqueta aún no se ha dibujado. Genera todas de una vez.</p>
+            <button class="btn-soft accent" :disabled="generatingAll" @click="generateAll"><Images :size="14" :stroke-width="2" /> Generar todas las maquetas</button>
           </div>
         </template>
 

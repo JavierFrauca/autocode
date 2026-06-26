@@ -1,9 +1,20 @@
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
+import matter from "gray-matter";
 import type { AppConfig, AppType } from "@shared";
 import { chat, type ChatMessage, type ChatResult } from "../llm/client.js";
 import { loadPrompt } from "../prompts.js";
 import { log } from "../log.js";
+
+/** Huella del CUERPO del spec (sin frontmatter). La maqueta sale del cuerpo; cambiar tipo/padre/orden
+ *  NO debe marcarla como desactualizada. La maqueta lleva embebida la huella con la que se generó. */
+export function specBodyHash(spec: string): string {
+  let body = spec;
+  try { body = matter(spec).content; } catch { /* sin frontmatter: usa el texto tal cual */ }
+  return createHash("sha256").update(body.trim()).digest("hex").slice(0, 16);
+}
+const HASH_RE = /<!--\s*spec-hash:\s*([a-f0-9]+)\s*-->/i;
 
 /**
  * Maquetador: genera un BOCETO HTML por pantalla (`pantallas/<slug>.preview.html`) a partir de la
@@ -34,13 +45,16 @@ export function mockupPathFor(relPath: string): string {
   return relPath.replace(/\\/g, "/").replace(/\.md$/i, ".preview.html");
 }
 
-/** ¿La maqueta está más vieja que su spec? (mtime del `.md` > mtime del `.preview.html`). */
+/** ¿La maqueta está desactualizada respecto al CUERPO del spec? Compara la huella embebida en la maqueta
+ *  con la del cuerpo actual. Una maqueta antigua sin huella (o un write-back del builder) NO se marca. */
 export async function isMockupStale(rootPath: string, relPath: string): Promise<boolean> {
   const mdAbs = path.resolve(rootPath, relPath);
   const htmlAbs = path.resolve(rootPath, mockupPathFor(relPath));
   try {
-    const [md, html] = await Promise.all([fs.stat(mdAbs), fs.stat(htmlAbs)]);
-    return md.mtimeMs > html.mtimeMs;
+    const [spec, html] = await Promise.all([fs.readFile(mdAbs, "utf-8"), fs.readFile(htmlAbs, "utf-8")]);
+    const m = html.match(HASH_RE);
+    if (!m) return false; // sin huella → no molestamos (se pondrá al regenerar)
+    return m[1] !== specBodyHash(spec);
   } catch {
     return false; // falta alguno → no aplica "desactualizada"
   }
@@ -239,7 +253,8 @@ export async function ensureMockupForScreen(
   }
 
   await fs.mkdir(path.dirname(htmlAbs), { recursive: true });
-  await fs.writeFile(htmlAbs, html, "utf-8");
+  // Embebe la huella del cuerpo del spec para detectar "desactualizada" sin depender de fechas.
+  await fs.writeFile(htmlAbs, `${html}\n<!-- spec-hash: ${specBodyHash(spec)} -->\n`, "utf-8");
   log.info("mockup", "maqueta generada", { ruta: htmlRel });
   return { status: "generated", path: htmlRel };
 }

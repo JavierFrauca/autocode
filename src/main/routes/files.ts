@@ -212,13 +212,14 @@ export async function registerFilesRoutes(app: FastifyInstance): Promise<void> {
     } catch (e: any) { return reply.code(500).send({ error: e?.message ?? String(e) }); }
   });
 
-  // POST /api/projects/:id/screens/materialize — vuelve a sincronizar las pantallas con el mapa.
-  app.post("/api/projects/:id/screens/materialize", async (req, reply) => {
+  // POST /api/projects/:id/screens/generate-all — "Generar todas las maquetas": materializa el mapa y
+  // genera (en 2º plano) la maqueta de cada pantalla que falte. El front sondea hasta que se pueblan.
+  app.post("/api/projects/:id/screens/generate-all", async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!(await getProject(id).catch(() => null))) return reply.code(404).send({ error: "not found" });
     const cfg = await loadConfig();
     try {
-      const r = await screens.materializeMap(cfg, id, { deleteOrphans: false });
+      const r = await screens.generateAllMockups(cfg, id);
       return { ok: true, ...r };
     } catch (e: any) { return reply.code(500).send({ error: e?.message ?? String(e) }); }
   });
