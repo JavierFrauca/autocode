@@ -15,6 +15,14 @@ describe("extractJson", () => {
     expect(extractJson("```\n{\"a\": 1}\n```")).toEqual({ a: 1 });
   });
 
+  it("repara saltos de línea CRUDOS dentro de strings (error típico de modelos pequeños)", () => {
+    const raw = '{"ficheros":[{"ruta":"dominios/cliente.md","contenido":"# Cliente\n\n## Campos\n- nombre"}]}';
+    const out = extractJson<{ ficheros: { ruta: string; contenido: string }[] }>(raw);
+    expect(out.ficheros[0].ruta).toBe("dominios/cliente.md");
+    expect(out.ficheros[0].contenido).toContain("# Cliente");
+    expect(out.ficheros[0].contenido).toContain("## Campos");
+  });
+
   it("encuentra objeto suelto entre texto", () => {
     const raw = "Respuesta: {\"changes\": [{\"path\":\"a.md\"}]} listo.";
     expect(extractJson(raw)).toEqual({ changes: [{ path: "a.md" }] });

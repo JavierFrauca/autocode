@@ -36,14 +36,50 @@ export function extractJson<T = any>(raw: string): T {
     try {
       return JSON.parse(cleanup(slice));
     } catch {}
+    // Modelos pequeños meten saltos de línea CRUDOS dentro de los strings (en vez de \n) — error de
+    // control muy común al pedir Markdown dentro de JSON. Los escapamos y reintentamos.
+    try {
+      return JSON.parse(cleanup(escapeControlCharsInStrings(slice)));
+    } catch {}
   }
 
   // 4) Cleanup global y reintento
   try {
     return JSON.parse(cleanup(text));
   } catch {}
+  try {
+    return JSON.parse(cleanup(escapeControlCharsInStrings(text)));
+  } catch {}
 
   throw new Error("respuesta no parseable como JSON");
+}
+
+/**
+ * Escapa los caracteres de control CRUDOS (salto de línea, retorno, tab) que aparezcan DENTRO de un
+ * string JSON. Es el error más típico de los modelos al devolver Markdown embebido en JSON: escriben
+ * el salto de línea real en vez de `\n`, lo que hace inválido el JSON. Recorremos el texto siguiendo
+ * el estado "dentro de string" y solo tocamos ahí (fuera de strings los saltos son legales).
+ */
+export function escapeControlCharsInStrings(s: string): string {
+  let out = "";
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (inStr) {
+      if (esc) { out += ch; esc = false; continue; }
+      if (ch === "\\") { out += ch; esc = true; continue; }
+      if (ch === '"') { out += ch; inStr = false; continue; }
+      if (ch === "\n") { out += "\\n"; continue; }
+      if (ch === "\r") { out += "\\r"; continue; }
+      if (ch === "\t") { out += "\\t"; continue; }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') { inStr = true; out += ch; continue; }
+    out += ch;
+  }
+  return out;
 }
 
 /** Quita comentarios y comas finales — los modelos los meten muy a menudo. */
