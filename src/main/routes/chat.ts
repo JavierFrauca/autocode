@@ -11,6 +11,7 @@ import { buildProjectContext } from "../chat/retrieval.js";
 import { buildChatTools } from "../chat/tools.js";
 import { buildGovernanceChatTools } from "../tools/governance-tools.js";
 import { documentSession } from "../agents/documenter.js";
+import { formatScopeForChat, getProjectScope } from "../agents/scope.js";
 import { log } from "../log.js";
 
 /** ¿El mensaje del usuario es una confirmación afirmativa? (para "dar por válida" la app). */
@@ -92,6 +93,10 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     let model = "";
     let tokensIn = 0;
     let tokensOut = 0;
+    // Pantallas que el documenter ha creado/actualizado en ESTE turno: el chat las devuelve para
+    // mostrar su boceto en línea ("ver las pantallas mientras se trabajan"). Fuera del try porque se
+    // persiste/emite después de cerrarlo.
+    const touchedScreens: string[] = [];
     try {
       // 0) Idempotencia: si ya existe un mensaje con este id, es un reenvío de la misma petición.
       //    Cortamos sin insertar nada ni volver a llamar al modelo (esto evitaba la triplicación).
@@ -136,6 +141,14 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       const baseMessages: ChatMessage[] = [{ role: "system", content: systemPrompt }];
       const ragContext = await buildProjectContext(cfg, projectId, content);
       if (ragContext) baseMessages.push({ role: "system", content: ragContext });
+      // Motor de completitud: el chat conoce QUÉ piezas del alcance faltan y dirige la entrevista al
+      // hueco más importante (best-effort: nunca rompe el turno si falla el cálculo).
+      try {
+        const scope = await getProjectScope(projectId);
+        baseMessages.push({ role: "system", content: formatScopeForChat(scope) });
+      } catch (e) {
+        log.warn("chat", "no se pudo calcular la cobertura del alcance", { err: e });
+      }
       baseMessages.push(...history.map((h) => ({ role: h.role as ChatMessage["role"], content: h.content })));
 
       // El chat (1) CONSULTA la biblioteca y los papers para responder con criterio (p.ej. "¿qué
@@ -153,14 +166,20 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
         {
           name: "documentar",
           description:
-            "Registra como papers del proyecto las DECISIONES de arquitectura, REGLAS de negocio y " +
-            "PANTALLAS que han quedado claras en ESTA conversación: extrae y persiste de forma estructurada " +
-            "(numera ADR/RN sin duplicar y genera la maqueta de cada pantalla nueva). Llámalo cuando se " +
-            "cierre algo que deba quedar documentado; devuelve qué se guardó/borró.",
+            "Registra como papers del proyecto las DECISIONES de arquitectura, REGLAS de negocio, el " +
+            "MODELO DE DATOS (entidades de dominios/) y PANTALLAS que han quedado claras en ESTA conversación: " +
+            "extrae y persiste de forma estructurada (numera ADR/RN sin duplicar y genera la maqueta de cada " +
+            "pantalla nueva). Llámalo cuando se cierre algo que deba quedar documentado; devuelve qué se guardó/borró.",
           parameters: { type: "object", properties: {} },
           run: async (): Promise<string> => {
             try {
               const r = await documentSession(cfg, projectId, sessionId);
+              for (const s of r.saved) {
+                const base = s.replace(/\\/g, "/").split("/").pop() ?? "";
+                if (s.startsWith("pantallas/") && s.toLowerCase().endsWith(".md") && !base.startsWith("_") && !touchedScreens.includes(s)) {
+                  touchedScreens.push(s);
+                }
+              }
               return JSON.stringify({ ok: true, guardados: r.saved, borrados: r.deleted });
             } catch (e: any) {
               return `Error documentando: ${e?.message ?? e}`;
@@ -243,7 +262,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       try {
         await db().insert(schema.messages).values({
           id: asstMsgId, projectId, sessionId, role: "assistant", content: full,
-          metadata: { model, tokensIn, tokensOut },
+          metadata: { model, tokensIn, tokensOut, ...(touchedScreens.length ? { screens: touchedScreens } : {}) },
         });
       } catch (e) {
         log.warn("chat", "no se pudo guardar la respuesta del asistente", { err: e });
@@ -305,7 +324,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
 
     if (closed) return; // el socket ya está cerrado; la respuesta quedó guardada arriba
 
-    send("assistant", { id: asstMsgId, content: full, model, tokensIn, tokensOut, documenterRunId: runId });
+    send("assistant", { id: asstMsgId, content: full, model, tokensIn, tokensOut, documenterRunId: runId, screens: touchedScreens });
     if (noticeId && noticeText) send("notice", { id: noticeId, content: noticeText });
     send("done", { ok: true, notice: !!noticeId });
     try { reply.raw.end(); } catch {}

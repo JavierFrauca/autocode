@@ -229,7 +229,12 @@ async function applyModify() {
   finally { busy.value = false; }
 }
 
-onMounted(load);
+onMounted(async () => {
+  await load();
+  // Permite abrir directamente una pantalla (p.ej. desde el chat: "Abrir para editar →").
+  const slug = route.query.slug;
+  if (typeof slug === "string" && slug && findNode(slug)) selectedSlug.value = slug;
+});
 onBeforeUnmount(() => clearInterval(pollTimer));
 watch(projectId, () => { selectedSlug.value = null; load(); });
 </script>

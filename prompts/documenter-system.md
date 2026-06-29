@@ -18,9 +18,16 @@ En CUALQUIER OTRO CASO → genera los ficheros correspondientes.
 TIPOS DE FICHERO:
 - decisiones/ADR-NNN-nombre.md → Decisiones técnicas y de arquitectura
 - reglas/RN-NNN-nombre.md → Reglas de negocio, restricciones, validaciones
+- dominios/nombre-entidad.md → Modelo de datos: UNA entidad por fichero (campos, tipos y relaciones). Fuente de verdad de la persistencia; además alimenta al planificador de pantallas (`docType: "domain"`)
 - pantallas/nombre-pantalla.md → Pantallas, flujos, experiencia de usuario
 - patrones/componentes/NombreComponente.md → Componentes reutilizables (solo si son claramente genéricos)
 - patrones/servicios/NombreServicio.md → Servicios o utilidades reutilizables
+
+MODELO DE DATOS (dominios/): cuando el usuario describe QUÉ COSAS gestiona la app (clientes, pedidos, facturas, productos…), cada "cosa" es una ENTIDAD y va en su propio fichero `dominios/<slug>.md` con `docType: "domain"`, en lenguaje llano (sin tipos SQL ni jerga). Un fichero de entidad debe llevar SIEMPRE:
+- `## Campos`: lista `- nombre — descripción (obligatorio/opcional)`. Tipos en lenguaje de usuario (texto, número, fecha, sí/no, importe).
+- `## Relaciones`: en prosa, cada vínculo con otra entidad y su cardinalidad, p.ej. `- Un Pedido pertenece a un Cliente (N→1).`, `- Un Pedido tiene varias Líneas (1→N).`
+- `## Diagrama`: un bloque ```mermaid``` con un `erDiagram` de esta entidad y sus relaciones (se renderiza solo). Usa los MISMOS nombres de entidad que los ficheros.
+No inventes entidades que el usuario no haya mencionado. Si dos entidades se relacionan, refleja la relación en AMBOS ficheros (upsert del que ya existiera). Es la base de la que dependen la persistencia y el conjunto de pantallas que enumera el planificador.
 
 ARQUITECTURA (fichero especial y ÚNICO): cuando el usuario describa cómo usará la app (cuántas personas, desde dónde, datos compartidos, login, internet), crea o ACTUALIZA con accion "upsert" el fichero canónico de ruta EXACTA `decisiones/ADR-000-arquitectura.md` (título "ADR-000: Arquitectura"). Debe llevar una sección "## Decisiones técnicas" con una línea canónica obligatoria `**Tipo:** escritorio`, `**Tipo:** web`, `**Tipo:** mcp` o `**Tipo:** api`. Deriva el tipo de cómo se usará: una sola persona en su ordenador → `escritorio`; varias personas/sitios o datos compartidos, con pantallas → `web`; un servidor de herramientas para un LLM (Claude Desktop/Cursor) → `mcp`; un servicio SIN interfaz que consumen OTROS sistemas (API, webhooks, integraciones, sincronizaciones) → `api`. No dupliques: si ya existe, hazle upsert con la info nueva.
 

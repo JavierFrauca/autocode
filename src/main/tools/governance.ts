@@ -8,11 +8,13 @@ import { deleteProjectDocument, safeRelPath, saveProjectDocument } from "../pape
 /**
  * Gobernanza de los ficheros del proyecto por CATEGORÍA, para que el chat (y el MCP) puedan gestionarlos.
  * Categorías de DOCUMENTO (papers .md indexados en la tabla `documents`): decisiones, reglas, pantallas,
- * patrones — se crean/editan/borran igual. Media (imágenes) y planes (solo lectura) van aparte.
- * Las escrituras pasan por `saveProjectDocument`/`deleteProjectDocument` para mantener disco+BD+índice en sync.
+ * dominios (modelo de datos: entidades, campos y relaciones — la fuente de verdad de la persistencia, que
+ * además alimenta al screen-planner), patrones — se crean/editan/borran igual. Media (imágenes) y planes
+ * (solo lectura) van aparte. Las escrituras pasan por `saveProjectDocument`/`deleteProjectDocument` para
+ * mantener disco+BD+índice en sync.
  */
 
-export const DOC_CATEGORIES = ["decisiones", "reglas", "pantallas", "patrones"] as const;
+export const DOC_CATEGORIES = ["decisiones", "reglas", "pantallas", "dominios", "patrones"] as const;
 export type DocCategory = (typeof DOC_CATEGORIES)[number];
 
 async function projectRoot(projectId: string): Promise<string | null> {

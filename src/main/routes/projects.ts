@@ -110,7 +110,7 @@ export async function registerProjectRoutes(app: FastifyInstance): Promise<void>
     const rootPath = path.join(cfg.projectsRoot, slug || id);
     await ensureDir(rootPath);
     // Create standard project folders
-    for (const folder of ["decisiones", "reglas", "pantallas", "patrones", "_historial", "_plan"]) {
+    for (const folder of ["decisiones", "reglas", "pantallas", "dominios", "patrones", "_historial", "_plan"]) {
       await ensureDir(path.join(rootPath, folder));
     }
 

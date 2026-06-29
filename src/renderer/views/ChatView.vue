@@ -92,7 +92,67 @@ async function loadMessages() {
   if (!sessionId.value) return;
   messages.value = await api.messages(sessionId.value);
   await scroll();
+  loadScope();
 }
+
+// Cobertura del alcance (motor de completitud): cuánto falta por definir. Se refresca al cargar la
+// conversación y tras cada respuesta del asistente (los papers nuevos cambian la cobertura).
+const scope = ref<{
+  items: { key: string; label: string; status: "ok" | "partial" | "missing"; detail: string }[];
+  coverage: number;
+  closed: boolean;
+} | null>(null);
+const scopeOpen = ref(false);
+async function loadScope() {
+  if (!projectId.value) return;
+  try { scope.value = await api.getScope(projectId.value); } catch { /* best-effort */ }
+}
+
+// ── Previews de pantalla embebidas en el chat ────────────────────────────────
+// Cuando el documenter crea/actualiza una pantalla en un turno, el servidor la devuelve en
+// `metadata.screens`. Cargamos su boceto (el `html` que ya expone `listScreens`) para mostrarlo en
+// línea. La maqueta se genera en segundo plano, así que reintentamos hasta que exista.
+const screenPreviews = ref<Record<string, { html: string | null; loading: boolean }>>({});
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function screenSlugOf(path: string): string {
+  return (path.split("/").pop() ?? path).replace(/\.md$/i, "");
+}
+function screenName(path: string): string {
+  return screenSlugOf(path).replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+async function loadScreenPreview(path: string, tries = 5): Promise<void> {
+  if (!projectId.value) return;
+  if (screenPreviews.value[path]?.html) return;
+  screenPreviews.value = { ...screenPreviews.value, [path]: { html: screenPreviews.value[path]?.html ?? null, loading: true } };
+  const slug = screenSlugOf(path);
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await api.listScreens(projectId.value);
+      const s = r.screens.find((x) => x.path === path || x.slug === slug);
+      if (s?.html) {
+        screenPreviews.value = { ...screenPreviews.value, [path]: { html: s.html, loading: false } };
+        return;
+      }
+    } catch { /* reintentamos */ }
+    await sleep(1500);
+  }
+  screenPreviews.value = { ...screenPreviews.value, [path]: { html: screenPreviews.value[path]?.html ?? null, loading: false } };
+}
+
+function messageScreens(m: any): string[] {
+  const s = m?.metadata?.screens;
+  return Array.isArray(s) ? s : [];
+}
+function openScreenInEditor(path: string): void {
+  router.push(`/projects/${projectId.value}/screens?slug=${encodeURIComponent(screenSlugOf(path))}`);
+}
+
+// Carga los bocetos de las pantallas que aparezcan en los mensajes (turno nuevo o historial).
+watch(messages, (list) => {
+  for (const m of list) for (const p of messageScreens(m)) loadScreenPreview(p);
+}, { deep: true });
 
 async function selectSession(id: string) {
   sessionId.value = id;
@@ -209,6 +269,7 @@ async function send() {
   } finally {
     stopPhase();
     sending.value = false;
+    loadScope();
   }
 }
 
@@ -402,6 +463,31 @@ watch(projectId, loadSessions);
         <span v-if="phase" class="phase-chip">
           <span class="phase-dot-sm" />{{ phase }}
         </span>
+        <button
+          v-if="scope"
+          class="scope-chip"
+          :class="{ done: scope.closed }"
+          :title="scope.closed ? 'Ya está todo definido' : 'Cuánto llevas definido — clic para ver el detalle'"
+          @click="scopeOpen = !scopeOpen"
+        >
+          <span class="scope-track"><span class="scope-fill" :style="{ width: Math.round(scope.coverage * 100) + '%' }" /></span>
+          {{ scope.closed ? 'Definido ✓' : 'Definido ' + Math.round(scope.coverage * 100) + '%' }}
+          <span class="scope-caret" :class="{ open: scopeOpen }">⌄</span>
+        </button>
+      </div>
+
+      <!-- Detalle de cobertura del alcance (motor de completitud) -->
+      <div v-if="scope && scopeOpen" class="scope-panel">
+        <div class="scope-head">
+          {{ scope.closed
+            ? 'Ya está todo lo esencial definido.'
+            : 'Vamos por el ' + Math.round(scope.coverage * 100) + '% — esto es lo que queda por hablar:' }}
+        </div>
+        <div v-for="it in scope.items" :key="it.key" class="scope-item">
+          <span class="scope-ico" :class="it.status">{{ it.status === 'ok' ? '✓' : it.status === 'partial' ? '◐' : '○' }}</span>
+          <span class="scope-lbl">{{ it.label }}</span>
+          <span class="scope-detail">{{ it.detail }}</span>
+        </div>
       </div>
 
       <!-- Mensajes -->
@@ -437,6 +523,25 @@ watch(projectId, loadSessions);
               <a class="doc-chip" @click.prevent="goToDocs">
                 📄 Ver documento actualizado →
               </a>
+            </div>
+            <!-- Bocetos de las pantallas trabajadas en este turno (ver mientras se habla) -->
+            <div v-if="messageScreens(m).length" class="screen-previews">
+              <div v-for="p in messageScreens(m)" :key="p" class="screen-card">
+                <div class="screen-card-head">
+                  <span class="screen-card-title">🖥️ {{ screenName(p) }}</span>
+                  <a class="screen-card-edit" @click.prevent="openScreenInEditor(p)">Abrir para editar →</a>
+                </div>
+                <iframe
+                  v-if="screenPreviews[p]?.html"
+                  class="screen-card-frame"
+                  sandbox=""
+                  :srcdoc="screenPreviews[p].html ?? ''"
+                />
+                <div v-else class="screen-card-empty">
+                  {{ screenPreviews[p]?.loading ? 'Generando el boceto…' : 'Boceto no disponible todavía.' }}
+                </div>
+              </div>
+              <div class="screen-hint">¿Hay que cambiar algo? Dímelo por el chat y lo actualizo.</div>
             </div>
           </div>
 
@@ -696,6 +801,72 @@ watch(projectId, loadSessions);
   font-weight: 500;
   color: var(--accent);
 }
+.scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 20px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  cursor: pointer;
+}
+.scope-chip.done { color: #16a34a; border-color: rgba(22,163,74,.4); }
+.scope-track { width: 48px; height: 5px; border-radius: 3px; background: var(--bg-active); overflow: hidden; }
+.scope-fill { display: block; height: 100%; background: currentColor; border-radius: 3px; transition: width .3s ease; }
+.scope-caret { font-size: 12px; line-height: 1; transition: transform .2s ease; opacity: .8; }
+.scope-caret.open { transform: rotate(180deg); }
+.scope-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-size: 12px;
+}
+.scope-head { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.scope-item { display: flex; align-items: center; gap: 8px; }
+.scope-ico { width: 16px; text-align: center; font-size: 13px; }
+.scope-ico.ok { color: #16a34a; }
+.scope-ico.partial { color: #d9a21b; }
+.scope-ico.missing { color: var(--text-dim); }
+.scope-lbl { font-weight: 500; min-width: 150px; }
+.scope-detail { color: var(--text-muted); font-size: 11px; }
+.screen-previews { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.screen-card {
+  width: 320px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+.screen-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.screen-card-title { font-weight: 500; }
+.screen-card-edit { color: var(--accent); cursor: pointer; font-size: 11px; white-space: nowrap; }
+.screen-card-frame { width: 100%; height: 220px; border: 0; background: #fff; display: block; }
+.screen-card-empty {
+  height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.screen-hint { flex-basis: 100%; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 .phase-chip-inline {
   display: inline-flex;
   align-items: center;
