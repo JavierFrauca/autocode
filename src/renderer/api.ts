@@ -210,6 +210,18 @@ export const api = {
       `/api/projects/${projectId}/architecture/ensure`, { method: "POST", body: JSON.stringify({}) },
     ),
 
+  // Cobertura del alcance (motor de completitud): qué piezas del proyecto faltan por definir
+  getScope: (projectId: string) =>
+    req<{
+      appType: string | null;
+      items: { key: string; label: string; status: "ok" | "partial" | "missing"; detail: string }[];
+      required: number;
+      done: number;
+      coverage: number;
+      closed: boolean;
+      nextQuestion: string | null;
+    }>(`/api/projects/${projectId}/scope`),
+
   // Actividad LiteLLM (visor global de la cola)
   llmQueue: () => req<{ runs: any[]; activeCount: number; current: any }>("/api/llm/queue"),
   cancelLlm: (id: string) => req<{ ok: boolean }>(`/api/llm/cancel/${id}`, { method: "POST", body: JSON.stringify({}) }),

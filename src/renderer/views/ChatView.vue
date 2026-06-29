@@ -92,6 +92,20 @@ async function loadMessages() {
   if (!sessionId.value) return;
   messages.value = await api.messages(sessionId.value);
   await scroll();
+  loadScope();
+}
+
+// Cobertura del alcance (motor de completitud): cuánto falta por definir. Se refresca al cargar la
+// conversación y tras cada respuesta del asistente (los papers nuevos cambian la cobertura).
+const scope = ref<{
+  items: { key: string; label: string; status: "ok" | "partial" | "missing"; detail: string }[];
+  coverage: number;
+  closed: boolean;
+} | null>(null);
+const scopeOpen = ref(false);
+async function loadScope() {
+  if (!projectId.value) return;
+  try { scope.value = await api.getScope(projectId.value); } catch { /* best-effort */ }
 }
 
 async function selectSession(id: string) {
@@ -209,6 +223,7 @@ async function send() {
   } finally {
     stopPhase();
     sending.value = false;
+    loadScope();
   }
 }
 
@@ -402,6 +417,31 @@ watch(projectId, loadSessions);
         <span v-if="phase" class="phase-chip">
           <span class="phase-dot-sm" />{{ phase }}
         </span>
+        <button
+          v-if="scope"
+          class="scope-chip"
+          :class="{ done: scope.closed }"
+          :title="scope.closed ? 'Ya está todo definido' : 'Cuánto llevas definido — clic para ver el detalle'"
+          @click="scopeOpen = !scopeOpen"
+        >
+          <span class="scope-track"><span class="scope-fill" :style="{ width: Math.round(scope.coverage * 100) + '%' }" /></span>
+          {{ scope.closed ? 'Definido ✓' : 'Definido ' + Math.round(scope.coverage * 100) + '%' }}
+          <span class="scope-caret" :class="{ open: scopeOpen }">⌄</span>
+        </button>
+      </div>
+
+      <!-- Detalle de cobertura del alcance (motor de completitud) -->
+      <div v-if="scope && scopeOpen" class="scope-panel">
+        <div class="scope-head">
+          {{ scope.closed
+            ? 'Ya está todo lo esencial definido.'
+            : 'Vamos por el ' + Math.round(scope.coverage * 100) + '% — esto es lo que queda por hablar:' }}
+        </div>
+        <div v-for="it in scope.items" :key="it.key" class="scope-item">
+          <span class="scope-ico" :class="it.status">{{ it.status === 'ok' ? '✓' : it.status === 'partial' ? '◐' : '○' }}</span>
+          <span class="scope-lbl">{{ it.label }}</span>
+          <span class="scope-detail">{{ it.detail }}</span>
+        </div>
       </div>
 
       <!-- Mensajes -->
@@ -696,6 +736,42 @@ watch(projectId, loadSessions);
   font-weight: 500;
   color: var(--accent);
 }
+.scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 20px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  cursor: pointer;
+}
+.scope-chip.done { color: #16a34a; border-color: rgba(22,163,74,.4); }
+.scope-track { width: 48px; height: 5px; border-radius: 3px; background: var(--bg-active); overflow: hidden; }
+.scope-fill { display: block; height: 100%; background: currentColor; border-radius: 3px; transition: width .3s ease; }
+.scope-caret { font-size: 12px; line-height: 1; transition: transform .2s ease; opacity: .8; }
+.scope-caret.open { transform: rotate(180deg); }
+.scope-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-size: 12px;
+}
+.scope-head { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.scope-item { display: flex; align-items: center; gap: 8px; }
+.scope-ico { width: 16px; text-align: center; font-size: 13px; }
+.scope-ico.ok { color: #16a34a; }
+.scope-ico.partial { color: #d9a21b; }
+.scope-ico.missing { color: var(--text-dim); }
+.scope-lbl { font-weight: 500; min-width: 150px; }
+.scope-detail { color: var(--text-muted); font-size: 11px; }
 .phase-chip-inline {
   display: inline-flex;
   align-items: center;

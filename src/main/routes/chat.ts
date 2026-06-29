@@ -11,6 +11,7 @@ import { buildProjectContext } from "../chat/retrieval.js";
 import { buildChatTools } from "../chat/tools.js";
 import { buildGovernanceChatTools } from "../tools/governance-tools.js";
 import { documentSession } from "../agents/documenter.js";
+import { formatScopeForChat, getProjectScope } from "../agents/scope.js";
 import { log } from "../log.js";
 
 /** ¿El mensaje del usuario es una confirmación afirmativa? (para "dar por válida" la app). */
@@ -136,6 +137,14 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       const baseMessages: ChatMessage[] = [{ role: "system", content: systemPrompt }];
       const ragContext = await buildProjectContext(cfg, projectId, content);
       if (ragContext) baseMessages.push({ role: "system", content: ragContext });
+      // Motor de completitud: el chat conoce QUÉ piezas del alcance faltan y dirige la entrevista al
+      // hueco más importante (best-effort: nunca rompe el turno si falla el cálculo).
+      try {
+        const scope = await getProjectScope(projectId);
+        baseMessages.push({ role: "system", content: formatScopeForChat(scope) });
+      } catch (e) {
+        log.warn("chat", "no se pudo calcular la cobertura del alcance", { err: e });
+      }
       baseMessages.push(...history.map((h) => ({ role: h.role as ChatMessage["role"], content: h.content })));
 
       // El chat (1) CONSULTA la biblioteca y los papers para responder con criterio (p.ej. "¿qué

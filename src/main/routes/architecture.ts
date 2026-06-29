@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { ARCH_TEMPLATE, deriveAppType, ensureArchitecture, getArchitecture } from "../architecture.js";
+import { getProjectScope } from "../agents/scope.js";
 
 /**
  * ADR de arquitectura: fuente de verdad del stack/topología. Lo elicita el chat (lo escribe
@@ -19,5 +20,12 @@ export async function registerArchitectureRoutes(app: FastifyInstance): Promise<
     const { id } = req.params as { id: string };
     const arch = await ensureArchitecture(id);
     return { exists: true, body: arch.body, appType: arch.appType, isDefault: arch.isDefault };
+  });
+
+  // Cobertura del alcance (motor de completitud): qué piezas faltan y el progreso. Lo consume el
+  // indicador del chat para que el usuario vea cuánto le queda por definir.
+  app.get("/api/projects/:id/scope", async (req) => {
+    const { id } = req.params as { id: string };
+    return getProjectScope(id);
   });
 }
