@@ -20,7 +20,7 @@ interface DocumenterInput {
 
 interface FileProp {
   coleccion: "project" | "templates";
-  docType?: "decision" | "rule" | "screen" | "pattern";
+  docType?: "decision" | "rule" | "screen" | "domain" | "pattern";
   transversal?: boolean;
   ruta: string;
   accion: "upsert" | "delete";

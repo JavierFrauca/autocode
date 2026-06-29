@@ -25,7 +25,7 @@ async function getProject(projectId: string) {
 
 async function loadProjectDocs(rootPath: string): Promise<string> {
   const docs: string[] = [];
-  const categories = ["decisiones", "reglas", "pantallas"];
+  const categories = ["decisiones", "reglas", "pantallas", "dominios"];
   for (const cat of categories) {
     const dir = path.join(rootPath, cat);
     try {

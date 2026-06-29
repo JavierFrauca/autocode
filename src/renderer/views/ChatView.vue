@@ -108,6 +108,52 @@ async function loadScope() {
   try { scope.value = await api.getScope(projectId.value); } catch { /* best-effort */ }
 }
 
+// ── Previews de pantalla embebidas en el chat ────────────────────────────────
+// Cuando el documenter crea/actualiza una pantalla en un turno, el servidor la devuelve en
+// `metadata.screens`. Cargamos su boceto (el `html` que ya expone `listScreens`) para mostrarlo en
+// línea. La maqueta se genera en segundo plano, así que reintentamos hasta que exista.
+const screenPreviews = ref<Record<string, { html: string | null; loading: boolean }>>({});
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function screenSlugOf(path: string): string {
+  return (path.split("/").pop() ?? path).replace(/\.md$/i, "");
+}
+function screenName(path: string): string {
+  return screenSlugOf(path).replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+async function loadScreenPreview(path: string, tries = 5): Promise<void> {
+  if (!projectId.value) return;
+  if (screenPreviews.value[path]?.html) return;
+  screenPreviews.value = { ...screenPreviews.value, [path]: { html: screenPreviews.value[path]?.html ?? null, loading: true } };
+  const slug = screenSlugOf(path);
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await api.listScreens(projectId.value);
+      const s = r.screens.find((x) => x.path === path || x.slug === slug);
+      if (s?.html) {
+        screenPreviews.value = { ...screenPreviews.value, [path]: { html: s.html, loading: false } };
+        return;
+      }
+    } catch { /* reintentamos */ }
+    await sleep(1500);
+  }
+  screenPreviews.value = { ...screenPreviews.value, [path]: { html: screenPreviews.value[path]?.html ?? null, loading: false } };
+}
+
+function messageScreens(m: any): string[] {
+  const s = m?.metadata?.screens;
+  return Array.isArray(s) ? s : [];
+}
+function openScreenInEditor(path: string): void {
+  router.push(`/projects/${projectId.value}/screens?slug=${encodeURIComponent(screenSlugOf(path))}`);
+}
+
+// Carga los bocetos de las pantallas que aparezcan en los mensajes (turno nuevo o historial).
+watch(messages, (list) => {
+  for (const m of list) for (const p of messageScreens(m)) loadScreenPreview(p);
+}, { deep: true });
+
 async function selectSession(id: string) {
   sessionId.value = id;
   pendingDocRunId.value = null;
@@ -478,6 +524,25 @@ watch(projectId, loadSessions);
                 📄 Ver documento actualizado →
               </a>
             </div>
+            <!-- Bocetos de las pantallas trabajadas en este turno (ver mientras se habla) -->
+            <div v-if="messageScreens(m).length" class="screen-previews">
+              <div v-for="p in messageScreens(m)" :key="p" class="screen-card">
+                <div class="screen-card-head">
+                  <span class="screen-card-title">🖥️ {{ screenName(p) }}</span>
+                  <a class="screen-card-edit" @click.prevent="openScreenInEditor(p)">Abrir para editar →</a>
+                </div>
+                <iframe
+                  v-if="screenPreviews[p]?.html"
+                  class="screen-card-frame"
+                  sandbox=""
+                  :srcdoc="screenPreviews[p].html ?? ''"
+                />
+                <div v-else class="screen-card-empty">
+                  {{ screenPreviews[p]?.loading ? 'Generando el boceto…' : 'Boceto no disponible todavía.' }}
+                </div>
+              </div>
+              <div class="screen-hint">¿Hay que cambiar algo? Dímelo por el chat y lo actualizo.</div>
+            </div>
           </div>
 
           <!-- Sistema (errores) -->
@@ -772,6 +837,36 @@ watch(projectId, loadSessions);
 .scope-ico.missing { color: var(--text-dim); }
 .scope-lbl { font-weight: 500; min-width: 150px; }
 .scope-detail { color: var(--text-muted); font-size: 11px; }
+.screen-previews { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+.screen-card {
+  width: 320px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+.screen-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.screen-card-title { font-weight: 500; }
+.screen-card-edit { color: var(--accent); cursor: pointer; font-size: 11px; white-space: nowrap; }
+.screen-card-frame { width: 100%; height: 220px; border: 0; background: #fff; display: block; }
+.screen-card-empty {
+  height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.screen-hint { flex-basis: 100%; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 .phase-chip-inline {
   display: inline-flex;
   align-items: center;
