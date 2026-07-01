@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
-import { computeScope, formatScopeForChat, type ScopeInventory } from "../agents/scope.js";
+import {
+  computeScope, dedupeEntidades, formatScopeForChat, hasAuthSectionContent, looksLikeRolesDoc,
+  normalizeEntitySlug, type ScopeInventory,
+} from "../agents/scope.js";
 
 /** Inventario base (vacío) que cada test va completando. */
 function emptyInv(appType: ScopeInventory["appType"]): ScopeInventory {
@@ -85,5 +88,61 @@ describe("computeScope (motor de completitud del alcance)", () => {
     expect(txt).toContain("ESTADO DE COBERTURA");
     expect(txt).toContain("SIGUIENTE HUECO");
     expect(txt).toContain("Qué datos maneja");
+  });
+});
+
+describe("normalizeEntitySlug (para deduplicar entidades de dominios/)", () => {
+  test("singular y plural normalizan igual", () => {
+    expect(normalizeEntitySlug("cliente")).toBe(normalizeEntitySlug("clientes"));
+    expect(normalizeEntitySlug("factura")).toBe(normalizeEntitySlug("facturas"));
+  });
+
+  test("acentos y guiones no cambian la identidad de la entidad", () => {
+    expect(normalizeEntitySlug("línea-pedido")).toBe(normalizeEntitySlug("linea_pedido"));
+  });
+
+  test("palabras cortas no se les quita la 's' final (no son plurales largos)", () => {
+    expect(normalizeEntitySlug("gas")).toBe("gas");
+  });
+});
+
+describe("dedupeEntidades (colapsa ficheros de dominio que son la misma entidad)", () => {
+  test("cliente.md y clientes.md cuentan como UNA sola entidad", () => {
+    const out = dedupeEntidades(["cliente", "clientes", "factura"]);
+    expect(out).toHaveLength(2);
+    expect(out).toContain("cliente");
+    expect(out).toContain("factura");
+  });
+
+  test("sin duplicados, no cambia nada", () => {
+    expect(dedupeEntidades(["cliente", "producto", "pedido"])).toHaveLength(3);
+  });
+});
+
+describe("looksLikeRolesDoc (detección por CONTENIDO, no por nombre de fichero)", () => {
+  test("encabezado de roles/permisos → true", () => {
+    expect(looksLikeRolesDoc("# ADR-002\n\n## Roles y permisos\n\nAdministrador: todo.")).toBe(true);
+  });
+
+  test("tabla de permisos con la palabra rol → true", () => {
+    expect(looksLikeRolesDoc("# ADR-003\n\n| Rol | Puede borrar |\n|---|---|\n| Admin | Sí |")).toBe(true);
+  });
+
+  test("ADR sin nada de roles → false", () => {
+    expect(looksLikeRolesDoc("# ADR-000: Arquitectura\n\n## Decisiones técnicas\n**Tipo:** web")).toBe(false);
+  });
+});
+
+describe("hasAuthSectionContent (exige contenido real, no solo el encabezado)", () => {
+  test("encabezado con la línea canónica de proveedores → true", () => {
+    expect(hasAuthSectionContent("## Autenticación\n**Proveedores:** propio\n**Registro de accesos:** sí")).toBe(true);
+  });
+
+  test("encabezado VACÍO (sin línea de proveedores) → false", () => {
+    expect(hasAuthSectionContent("## Autenticación\n")).toBe(false);
+  });
+
+  test("sin sección de Autenticación → false", () => {
+    expect(hasAuthSectionContent("## Decisiones técnicas\n**Tipo:** web")).toBe(false);
   });
 });

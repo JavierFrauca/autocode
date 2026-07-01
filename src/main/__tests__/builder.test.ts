@@ -96,6 +96,34 @@ describe("runBuilder (motor del agente único, offline)", () => {
     expect(res.status).toBe("unsupported");
   }, 15_000);
 
+  it("un error de compilación repetido dispara el aviso de 'cambia de estrategia' (no antes del 2º ciclo seguido)", async () => {
+    // El usuario NO SABE PROGRAMAR: un estancamiento de compilación debe darle al agente más margen
+    // (COMPILE_STALL_LIMIT) y, si el error se repite, un empujón explícito para que cambie de enfoque
+    // en vez de repetir el mismo intento — nunca se le pide ayuda a la persona por esto.
+    const seenMessages: string[] = [];
+    let cycle = 0;
+    const toolLoop: BuilderDeps["toolLoop"] = async (_cfg, _role, messages, tools: ChatTool[]) => {
+      const userMsg = messages.find((m) => m.role === "user");
+      if (userMsg) seenMessages.push(String(userMsg.content));
+      if (cycle === 0) {
+        const write = tools.find((t) => t.name === "escribir_fichero")!;
+        await write.run({ ruta: "tsconfig.json", contenido: TSCONFIG });
+        await write.run({ ruta: "src/index.ts", contenido: BAD });
+      }
+      cycle++;
+      return { messages: [], toolsUsed: [], supported: true };
+    };
+    const res = await runBuilder(cfg, ws, baseOpts, { toolLoop, systemPrompt: "test" });
+    expect(res.status).toBe("stalled");
+    // 1ª continuación (tras el 1er rojo): todavía no ha "repetido" nada → sin aviso de estrategia.
+    expect(seenMessages[1]).not.toContain("CAMBIA DE ESTRATEGIA");
+    // 2ª continuación en adelante: mismo error 2 ciclos seguidos → aviso explícito.
+    expect(seenMessages[2]).toContain("CAMBIA DE ESTRATEGIA");
+    expect(seenMessages[2]).toContain("MISMO ERROR");
+    // Aguanta más de los 3 ciclos que se usaban antes para fases de UI/tests (le da margen extra al agente).
+    expect(res.cycles).toBeGreaterThan(3);
+  }, 30_000);
+
   it("reporta el progreso por ciclo (onCycle/onGate)", async () => {
     const gates: Array<{ compiledGreen: boolean }> = [];
     const toolLoop = scriptedDriver([

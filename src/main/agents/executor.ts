@@ -37,6 +37,16 @@ export const PHASES = ["Recolección", "Análisis", "Construcción", "Validació
 
 const nowIso = () => new Date().toISOString();
 
+/**
+ * El usuario NO sabe programar: un mensaje técnico crudo (stack trace, salida de tsc/npm, "ENOENT…")
+ * no le sirve de nada y solo lo alarma. Registramos el detalle completo en los logs (para depurar) y
+ * devolvemos SIEMPRE un texto en lenguaje llano para lo que ve él (chat / túnel de ejecución).
+ */
+function friendly(prefix: string, e?: unknown): string {
+  if (e !== undefined) log.warn("executor", prefix, { err: e });
+  return prefix;
+}
+
 async function getProject(projectId: string) {
   const rows = await db().select().from(schema.projects).where(eq(schema.projects.id, projectId));
   if (!rows[0]) throw new Error(`Project ${projectId} not found`);
@@ -115,8 +125,8 @@ export const runExecutor = {
         }
       } catch (e: any) {
         finalStatus = "failed";
-        finalError = String(e?.message ?? e);
         log.error("executor", "fallo en la fase de pruebas bajo demanda", { err: e, projectId });
+        finalError = friendly("Ha ocurrido un problema técnico al crear las pruebas. Vuelve a intentarlo en un momento.");
       }
       await db().update(schema.executions)
         .set({ status: finalStatus, error: finalError, finishedAt: nowIso() })
@@ -147,7 +157,7 @@ export const runExecutor = {
           planRow = await latestPlanRow(projectId);
           await rec.done(sGenPlan, "Plan generado");
         } catch (e: any) {
-          await rec.fail(sGenPlan, `No se pudo generar el plan: ${e?.message ?? e}`);
+          await rec.fail(sGenPlan, friendly("No se pudo generar el plan de desarrollo automáticamente. Vuelve a intentarlo.", e));
         }
       }
 
@@ -178,7 +188,7 @@ export const runExecutor = {
           const r = await resetWorkspace(ws);
           await rec.done(sReset, `App anterior limpiada (${r.removed} elementos${r.failed.length ? `; ${r.failed.length} en uso, omitidos` : ""})`);
         } catch (e: any) {
-          await rec.fail(sReset, `No se pudo limpiar del todo: ${String(e?.message ?? e).slice(0, 120)}`);
+          await rec.fail(sReset, friendly("No se pudo limpiar del todo la app anterior — puede que algún fichero esté en uso.", e));
         }
       }
 
@@ -203,7 +213,7 @@ export const runExecutor = {
           scaffolded = files.length > 0;
           await rec.done(sScaf, scaffolded ? `Andamiaje colocado (${files.length} ficheros, ya renderiza)` : "Sin andamiaje copiable para este tipo (se construye desde plantillas)");
         } catch (e: any) {
-          await rec.fail(sScaf, `No se pudo colocar el andamiaje: ${String(e?.message ?? e).slice(0, 140)}`);
+          await rec.fail(sScaf, friendly("No se pudo preparar la base de la aplicación. Vuelve a intentarlo.", e));
         }
       }
 
@@ -218,7 +228,7 @@ export const runExecutor = {
             ? `Formularios listos — ${r.total} pantalla(s)${r.generated ? `, ${r.generated} preparada(s) ahora` : ""}`
             : "No hay pantallas que preparar todavía");
         } catch (e: any) {
-          await rec.done(sForms, `No se pudieron preparar todos los formularios — ${String(e?.message ?? e).slice(0, 120)}`);
+          await rec.done(sForms, friendly("No se pudieron preparar todos los formularios de las pantallas — se completarán durante la construcción.", e));
         }
       }
 
@@ -275,9 +285,12 @@ export const runExecutor = {
           const smoke = await runBuild(ws, appType);
           if (smoke.skipped) await rec.done(sBuild, `Verificación de arranque omitida — ${smoke.skipped}`);
           else if (smoke.ran && smoke.ok) await rec.done(sBuild, "La app construye/empaqueta sin errores ✓");
-          else await rec.fail(sBuild, `El build emitió errores (no bloquea):\n${smoke.output.slice(-400)}`);
+          else {
+            log.warn("executor", "el build final emitió errores (no bloquea la versión)", { output: smoke.output.slice(-2000) });
+            await rec.fail(sBuild, "El empaquetado final ha dado algún aviso, pero no afecta a la versión ya guardada.");
+          }
         } catch (e: any) {
-          await rec.done(sBuild, `Verificación de arranque no concluyente — ${String(e?.message ?? e).slice(0, 120)}`);
+          await rec.done(sBuild, friendly("Verificación de arranque no concluyente — no afecta a la versión ya guardada.", e));
         }
 
         // Las PRUEBAS de aceptación ya NO se crean aquí: se escriben tras el "OK" del usuario (validación),
@@ -291,9 +304,12 @@ export const runExecutor = {
             const vis = await verifyVisual(ws, appType);
             if (vis.skipped) await rec.done(sVis, `Verificación visual omitida — ${vis.skipped}`);
             else if (vis.ok) await rec.done(sVis, `La interfaz renderiza correctamente ✓${vis.screenshot ? `\n${vis.screenshot}` : ""}`);
-            else await rec.fail(sVis, `La interfaz no renderiza bien (no bloquea): ${vis.findings.map((f) => f.type).join(", ") || "sin detalle"}${vis.screenshot ? `\n${vis.screenshot}` : ""}`);
+            else {
+              log.warn("executor", "la interfaz no renderiza bien", { findings: vis.findings });
+              await rec.fail(sVis, `La interfaz podría no verse del todo bien (no bloquea la versión guardada).${vis.screenshot ? `\n${vis.screenshot}` : ""}`);
+            }
           } catch (e: any) {
-            await rec.done(sVis, `Verificación visual no concluyente — ${String(e?.message ?? e).slice(0, 120)}`);
+            await rec.done(sVis, friendly("Verificación visual no concluyente — no afecta a la versión ya guardada.", e));
           }
         }
       } else if (result.status === "unsupported") {
@@ -363,7 +379,11 @@ export const runExecutor = {
       }
       log.error("executor", "fallo en la ejecución del plan", { err: e, projectId });
       await db().update(schema.executions)
-        .set({ status: "failed", error: String(e?.message ?? e), finishedAt: nowIso() })
+        .set({
+          status: "failed",
+          error: "Ha ocurrido un problema técnico inesperado construyendo la aplicación. Vuelve a intentarlo.",
+          finishedAt: nowIso(),
+        })
         .where(eq(schema.executions.id, execId));
     }
 
@@ -408,9 +428,9 @@ async function runTestsAndReview(
       repair: true, scaffolded: false, goal: "tests", maxCycles: cyclesForPlan(plan, "tests"),
     });
     if (tRes.status === "green") await rec.done(sTests, `Pruebas creadas y en verde ✓ (${tRes.testsTotal} prueba(s))`);
-    else await rec.fail(sTests, `No se completaron las pruebas: el agente ${tRes.status === "stalled" ? "se atascó" : tRes.status}. La revisión de abajo lo detalla.`);
+    else await rec.fail(sTests, "No he conseguido dejar terminadas las pruebas de aceptación tras varios intentos. La revisión de abajo lo detalla.");
   } catch (e: any) {
-    await rec.done(sTests, `Fase de pruebas no concluyente — ${String(e?.message ?? e).slice(0, 120)}`);
+    await rec.done(sTests, friendly("Fase de pruebas no concluyente. Puedes pedir que se reintente cuando quieras.", e));
   }
 
   const sRev = await rec.add("Validación", "Revisión de las pruebas (cobertura y calidad)");
@@ -420,30 +440,38 @@ async function runTestsAndReview(
     else if (review.ok) await rec.done(sRev, `Las pruebas ejercitan el código y cubren los criterios ✓${review.summary ? `\n${review.summary}` : ""}`);
     else await rec.fail(sRev, `Aviso de cobertura:\n${review.findings.slice(0, 6).map((f) => `• ${f}`).join("\n")}`);
   } catch (e: any) {
-    await rec.done(sRev, `Revisión de pruebas no concluyente — ${String(e?.message ?? e).slice(0, 120)}`);
+    await rec.done(sRev, friendly("Revisión de pruebas no concluyente.", e));
   }
 }
 
-/** Texto de escalado a la persona cuando el agente no llega a verde. */
+/**
+ * Texto de escalado a la persona cuando el agente no llega a verde. NUNCA incluye texto técnico crudo
+ * (salida del compilador, stacks…) — el usuario no sabe programar y no puede hacer nada con eso; el
+ * detalle completo queda en los logs (ver "estancado" en builder.ts) para quien depure. Solo escalamos
+ * con algo que la PERSONA sí puede responder (qué debe hacer la pantalla, qué criterio es ambiguo…); un
+ * estancamiento puramente de compilación ya ha agotado un margen extra de reintentos automáticos antes
+ * de llegar aquí (ver COMPILE_STALL_LIMIT en builder.ts), así que insistir con más detalle técnico no
+ * ayudaría — se ofrece reintentar en vez de explicar el error.
+ */
 function buildEscalation(r: BuilderResult): string {
   if (r.status === "unsupported") {
-    return "El modelo configurado para el rol de código no permite usar herramientas (function-calling), " +
-      "que es lo que el agente constructor necesita. Configura un modelo con soporte de tool-calling.";
+    return "El modelo de IA configurado para generar código no es compatible con esta aplicación. " +
+      "Revísalo en Ajustes y vuelve a intentarlo.";
   }
   if (!r.compiledGreen) {
-    return `La aplicación no llega a compilar: se quedó estancada en ${r.compileErrors} error(es) de TypeScript ` +
-      `tras varios intentos con enfoques distintos.\n\nPrimeros errores:\n${(r.compileOutput || "").slice(0, 1500)}`;
+    return "He tenido un problema técnico terminando la parte interna de la aplicación tras varios intentos con " +
+      "enfoques distintos. No es algo que tengas que resolver tú: puedo intentarlo de nuevo (a veces basta con " +
+      "reintentar), o si quieres, dime si prefieres simplificar alguna parte de lo pedido.";
   }
   if (r.uiPending) {
-    return "La aplicación compila, pero el agente no terminó de construir las PANTALLAS reales (se quedó en " +
-      "el andamiaje de ejemplo) tras varios intentos. Cuéntame qué debería mostrar/hacer esa pantalla y lo reintento.";
+    return "La aplicación funciona por dentro, pero no terminé de construir las PANTALLAS reales tras varios " +
+      "intentos. Cuéntame qué debería mostrar/hacer esa pantalla y lo reintento.";
   }
   if (r.testsRan && r.testsFailed > 0) {
-    return `La aplicación compila, pero ${r.testsFailed} de ${r.testsTotal} pruebas de aceptación siguen fallando ` +
-      `tras varios intentos. Quizá algún criterio sea ambiguo o más complejo de lo previsto.`;
+    return `La aplicación funciona, pero ${r.testsFailed} de ${r.testsTotal} pruebas de aceptación siguen sin ` +
+      "pasar tras varios intentos. Puede que algún requisito no quedara del todo claro: cuéntame más detalle y lo reviso.";
   }
-  return "La aplicación compila, pero el agente se atascó antes de terminar tras varios intentos. Cuéntame qué " +
-    "falta o qué debería hacer y lo reintento.";
+  return "Me he quedado atascado antes de terminar tras varios intentos. Cuéntame qué falta o qué debería hacer y lo reintento.";
 }
 
 /** Tras agotar los intentos, deja una pregunta del asistente en la conversación del proyecto. */

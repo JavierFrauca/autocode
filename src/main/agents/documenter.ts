@@ -84,9 +84,31 @@ async function buildNumberingHint(rootPath: string): Promise<string> {
         ...existing,
       );
     }
+    // Entidades de dominios/ ya existentes: el modelo no numera estos ficheros, así que sin un ancla
+    // similar a la de ADR/RN acababa creando "cliente.md" y "clientes.md" para la MISMA entidad en
+    // turnos distintos (contaban como dos entidades e inflaban la cobertura del alcance sin motivo).
+    const domainNames = await listDomainFiles(rootPath);
+    if (domainNames.length) {
+      lines.push(
+        "- Entidades de MODELO DE DATOS que YA existen (dominios/). Si el usuario habla de alguna de estas " +
+          "(aunque la nombre en plural o con otras palabras), reutiliza su ruta EXACTA con accion \"upsert\" " +
+          "para AMPLIARLA — NUNCA crees un fichero nuevo para la misma entidad con otro nombre:",
+        ...domainNames.map((n) => `  - dominios/${n}`),
+      );
+    }
     return lines.join("\n");
   } catch {
     return "";
+  }
+}
+
+/** Ficheros de entidad ya existentes en `dominios/` (excluye los que empiecen por "_"). */
+async function listDomainFiles(rootPath: string): Promise<string[]> {
+  try {
+    const names = await fs.readdir(path.join(rootPath, "dominios"));
+    return names.filter((n) => n.toLowerCase().endsWith(".md") && !n.startsWith("_"));
+  } catch {
+    return [];
   }
 }
 
@@ -172,34 +194,45 @@ export const runDocumenter = {
     const ficheros = output.ficheros ?? [];
     console.log(`[documenter] apply runId=${runId} ficheros=${ficheros.length}`);
 
-    // Escritura/borrado vía los escritores compartidos (disco + BD + índice). Las PANTALLAS pasan
-    // SIEMPRE por el servicio único de pantallas (frontmatter + registro + maqueta auto), nunca a pelo.
-    for (const f of ficheros) {
-      if (!f.ruta) continue;
+    // Las PANTALLAS van aparte: cada una dispara su propia generación de MAQUETA (una llamada a IA), que
+    // saveScreenSpec espera de forma síncrona. Si el turno documenta varias pantallas a la vez y las
+    // procesásemos una a una, el usuario se queda esperando la respuesta del chat N veces más — por eso
+    // van en PARALELO (son ficheros independientes entre sí, no hay orden que preservar).
+    const pantallas = ficheros.filter((f) => f.ruta && isScreenDoc(f.ruta));
+    const resto = ficheros.filter((f) => f.ruta && !isScreenDoc(f.ruta));
+
+    // Decisiones/reglas/dominios: sin IA (solo disco + BD + índice) y sensibles al ORDEN de numeración
+    // (ADR/RN), así que se mantienen secuenciales.
+    for (const f of resto) {
       try {
-        const esPantalla = isScreenDoc(f.ruta);
         if (f.accion === "delete") {
-          if (esPantalla) await deleteScreen(cfg, projectId, f.ruta);
-          else await deleteProjectDocument(cfg, projectId, f.ruta);
+          await deleteProjectDocument(cfg, projectId, f.ruta);
         } else if (f.contenido?.trim()) {
-          if (esPantalla) {
-            // Auto-maqueta solo si falta (mockup: "auto" → no regenera si ya hay boceto).
-            await saveScreenSpec(cfg, projectId, f.ruta, f.contenido, { mockup: "auto" });
-          } else {
-            await saveProjectDocument(cfg, projectId, {
-              ruta: f.ruta,
-              contenido: f.contenido,
-              titulo: f.titulo,
-              tags: f.tags,
-              coleccion: f.coleccion,
-              agentRunId: runId,
-            });
-          }
+          await saveProjectDocument(cfg, projectId, {
+            ruta: f.ruta,
+            contenido: f.contenido,
+            titulo: f.titulo,
+            tags: f.tags,
+            coleccion: f.coleccion,
+            agentRunId: runId,
+          });
         }
       } catch (e) {
         log.warn("documenter", "no se pudo aplicar fichero", { err: e, ruta: f.ruta });
       }
     }
+
+    await Promise.all(pantallas.map(async (f) => {
+      try {
+        if (f.accion === "delete") await deleteScreen(cfg, projectId, f.ruta);
+        else if (f.contenido?.trim()) {
+          // Auto-maqueta solo si falta (mockup: "auto" → no regenera si ya hay boceto).
+          await saveScreenSpec(cfg, projectId, f.ruta, f.contenido, { mockup: "auto" });
+        }
+      } catch (e) {
+        log.warn("documenter", "no se pudo aplicar la pantalla", { err: e, ruta: f.ruta });
+      }
+    }));
   },
 };
 

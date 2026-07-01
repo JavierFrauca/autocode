@@ -111,7 +111,9 @@ async function loadScope() {
 // ── Previews de pantalla embebidas en el chat ────────────────────────────────
 // Cuando el documenter crea/actualiza una pantalla en un turno, el servidor la devuelve en
 // `metadata.screens`. Cargamos su boceto (el `html` que ya expone `listScreens`) para mostrarlo en
-// línea. La maqueta se genera en segundo plano, así que reintentamos hasta que exista.
+// línea. La maqueta se genera de forma SÍNCRONA dentro del turno (el servidor espera a que exista
+// antes de responder), así que normalmente ya está lista a la primera; el reintento es solo un
+// colchón defensivo (lag de índice, o si el servidor tardó más de lo normal).
 const screenPreviews = ref<Record<string, { html: string | null; loading: boolean }>>({});
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

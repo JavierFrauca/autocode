@@ -115,7 +115,19 @@ export interface BuilderDeps {
 
 const MAX_GATE_CYCLES = 8;        // cuántas veces reabrimos al agente tras un gate en rojo
 const TOOL_ROUNDS_PER_CYCLE = 18; // rondas de tool-calling dentro de cada ciclo
-const STALL_LIMIT = 3;            // ciclos seguidos sin mejorar la métrica → estancado
+const STALL_LIMIT = 3;            // ciclos seguidos sin mejorar la métrica → estancado (UI/tests: aquí SÍ puede
+                                   // ayudar una aclaración del usuario, así que no insistimos de más)
+// Fallos de COMPILACIÓN son distintos: el usuario NO SABE PROGRAMAR, así que enseñarle un error de
+// TypeScript no le sirve de nada — solo el agente puede resolverlo. Le damos más margen antes de
+// rendirse y pedirle ayuda a una persona que no puede dársela.
+const COMPILE_STALL_LIMIT = 6;
+// Nº de líneas iniciales del error que comparamos para detectar "sigue siendo el MISMO fallo".
+const ERROR_SIGNATURE_LINES = 3;
+
+/** Firma corta del error de compilación (para detectar si el agente repite el mismo fallo ciclo tras ciclo). */
+function errorSignature(errors: string): string {
+  return errors.split("\n").slice(0, ERROR_SIGNATURE_LINES).join("\n").trim();
+}
 
 /** Métrica de progreso (cuanto menor, mejor). Fases: no-compila ≫ UI-placeholder ≫ faltan-tests ≫ tests-rojos ≫ verde. */
 function gateMetric(compileRan: boolean, compiledGreen: boolean, compileErrors: number, vitest: VitestResult | null, uiPending: boolean, testsPending: boolean): number {
@@ -258,6 +270,7 @@ function buildContinuation(
   uiPending: boolean,
   testsPending: boolean,
   opts: BuilderOptions,
+  errorRepeatStreak = 0,
 ): string {
   const lines: string[] = [`## Estado tras el ciclo ${cycle} (verificación real del sistema)`];
   if (!compile.ran) {
@@ -266,9 +279,16 @@ function buildContinuation(
         "Copia el andamiaje dorado del tipo de app con leer_plantilla, instálalo y compílalo.",
     );
   } else if (!compile.ok) {
+    const insiste = errorRepeatStreak >= 2
+      ? `\n\nLLEVAS ${errorRepeatStreak} CICLOS SEGUIDOS CON EXACTAMENTE EL MISMO ERROR: repetir el mismo cambio no va a ` +
+        "arreglarlo. CAMBIA DE ESTRATEGIA: lee el mensaje de TypeScript LITERALMENTE (fichero y línea exactos que indica), " +
+        "comprueba con leer_fichero ese punto exacto en vez de asumir, y si tu último cambio no lo arregló, REVIÉRTELO " +
+        "antes de probar algo distinto. Si es un tipo/import que no encuentras, busca el contrato real con " +
+        "listar_ficheros/leer_fichero en vez de inventar la firma."
+      : "";
     lines.push(
       `La app NO compila: ${compileErrors} error(es). Lee los ficheros implicados, corrige y vuelve a compilar. ` +
-        `Errores:\n\n${compile.errors.slice(0, 5000)}`,
+        `Errores:\n\n${compile.errors.slice(0, 5000)}${insiste}`,
     );
   } else if (uiPending) {
     const base = opts.appType === "server" ? "web/src" : "src/renderer/src";
@@ -321,6 +341,8 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
   let lastTestsPending = false;
   let bestMetric = Number.POSITIVE_INFINITY;
   let stall = 0;
+  let lastErrorSig = "";
+  let errorRepeatStreak = 0;
   let cycle = 0;
   // Presupuesto de ciclos: escala con el tamaño del plan (lo calcula el executor). Acotado por sanidad.
   const maxCycles = Math.max(3, Math.min(40, opts.maxCycles ?? MAX_GATE_CYCLES));
@@ -328,7 +350,7 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
   for (; cycle < maxCycles; cycle++) {
     const userMsg = cycle === 0
       ? buildIntro(opts)
-      : buildContinuation(cycle, lastCompile, lastErrors, lastVitest, lastUiPending, lastTestsPending, opts);
+      : buildContinuation(cycle, lastCompile, lastErrors, lastVitest, lastUiPending, lastTestsPending, opts, errorRepeatStreak);
     const messages: ChatMessage[] = [
       { role: "system", content: system },
       { role: "user", content: userMsg },
@@ -391,12 +413,21 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
       };
     }
 
+    // ── Repetición de error: ¿el ciclo anterior ya vio EXACTAMENTE este mismo fallo de compilación? ──
+    const errSig = compiledGreen ? "" : errorSignature(compile.errors);
+    errorRepeatStreak = !compiledGreen && errSig && errSig === lastErrorSig ? errorRepeatStreak + 1 : errSig ? 1 : 0;
+    lastErrorSig = errSig;
+
     // ── Estancamiento ──────────────────────────────────────────────────────────────────────
+    // Límite distinto según la fase: en compilación el usuario NO puede ayudar (no sabe programar), así
+    // que el agente insiste más antes de rendirse; en UI/tests una aclaración del usuario sí puede
+    // desbloquear, así que no le hacemos esperar de más.
     const metric = gateMetric(compile.ran, compiledGreen, compileErrors, vitest, uiPending, testsPending);
     if (metric < bestMetric) { bestMetric = metric; stall = 0; } else { stall++; }
-    log.info("builder", "gate en rojo", { cycle, compiledGreen, compileErrors, testsFailed: vitest?.failed ?? null, stall });
-    if (stall >= STALL_LIMIT) {
-      log.warn("builder", "estancado", { cycle, bestMetric, stall });
+    const stallLimit = !compiledGreen ? COMPILE_STALL_LIMIT : STALL_LIMIT;
+    log.info("builder", "gate en rojo", { cycle, compiledGreen, compileErrors, testsFailed: vitest?.failed ?? null, stall, stallLimit, errorRepeatStreak });
+    if (stall >= stallLimit) {
+      log.warn("builder", "estancado", { cycle, bestMetric, stall, stallLimit, compileErrors: lastErrors, compileOutput: compile.errors.slice(0, 3000) });
       break;
     }
   }

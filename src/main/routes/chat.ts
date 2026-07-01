@@ -142,9 +142,14 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       const ragContext = await buildProjectContext(cfg, projectId, content);
       if (ragContext) baseMessages.push({ role: "system", content: ragContext });
       // Motor de completitud: el chat conoce QUÉ piezas del alcance faltan y dirige la entrevista al
-      // hueco más importante (best-effort: nunca rompe el turno si falla el cálculo).
+      // hueco más importante (best-effort: nunca rompe el turno si falla el cálculo). Guardamos si YA
+      // estaba cerrado ANTES de este turno: es la condición para la red de seguridad de más abajo (si no
+      // se pudo calcular, se trata como "abierto" — más vale una llamada de más al documenter que perder
+      // en silencio lo que el usuario acaba de contar).
+      let scopeWasOpenBeforeTurn = true;
       try {
         const scope = await getProjectScope(projectId);
+        scopeWasOpenBeforeTurn = !scope.closed;
         baseMessages.push({ role: "system", content: formatScopeForChat(scope) });
       } catch (e) {
         log.warn("chat", "no se pudo calcular la cobertura del alcance", { err: e });
@@ -182,15 +187,26 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
               }
               return JSON.stringify({ ok: true, guardados: r.saved, borrados: r.deleted });
             } catch (e: any) {
-              return `Error documentando: ${e?.message ?? e}`;
+              // El resultado de la tool lo lee el MODELO (puede acabar citándolo tal cual al usuario, que
+              // no sabe programar): nunca le pasamos el mensaje técnico crudo, solo lo registramos en logs.
+              log.warn("chat", "el documenter falló al guardar lo hablado en este turno", { err: e, projectId, sessionId });
+              return JSON.stringify({
+                ok: false,
+                aviso: "No he podido guardar esto como documento del proyecto por un problema técnico puntual. Dile al usuario que no pasa nada y que lo intentarás de nuevo en el próximo mensaje; no es necesario que repita lo dicho.",
+              });
             }
           },
         },
       ];
       let llmMessages: ChatMessage[] = baseMessages;
+      // Tools de ESCRITURA usadas este turno (documentar + gobernanza *_guardar/*_borrar): si el bucle
+      // falla entero, la dejamos vacía a propósito — no sabemos qué pasó, así que la red de seguridad de
+      // abajo actúa como si no se hubiera guardado nada (más seguro que asumir que sí).
+      let toolsUsedThisTurn: string[] = [];
       try {
         const loop = await runToolLoop(cfg, "chat", baseMessages, chatTools, "chat-tools");
         if (loop.supported) llmMessages = loop.messages as ChatMessage[];
+        toolsUsedThisTurn = loop.toolsUsed;
       } catch (e) {
         log.warn("chat", "el bucle de tools del chat falló; respondo sin tools", { err: e });
       }
@@ -244,6 +260,28 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
           send("delta", { text: full });
         }
       }
+
+      // Red de seguridad del documenter: si había un hueco del alcance ABIERTO antes de este turno y el
+      // modelo no usó NINGUNA tool de escritura (ni documentar ni gobernanza *_guardar/*_borrar), lo que
+      // el usuario acaba de contar se perdería en silencio — nada más lo detectaría. Documentamos de
+      // todas formas: documentSession decide por sí sola si de verdad había algo que guardar (si el turno
+      // era solo un saludo, no hace nada), así no depende de que el MISMO modelo acierte dos veces. No se
+      // dispara si YA se usó alguna tool de escritura (evita duplicar con lo que ya se guardó) ni una vez
+      // el alcance está cerrado (evita una llamada extra en cada mensaje para siempre).
+      const usoAlgunaToolDeEscritura = toolsUsedThisTurn.some((t) => t === "documentar" || /_guardar$|_borrar$/.test(t));
+      if (scopeWasOpenBeforeTurn && !usoAlgunaToolDeEscritura) {
+        try {
+          const r = await documentSession(cfg, projectId, sessionId);
+          for (const s of r.saved) {
+            const base = s.replace(/\\/g, "/").split("/").pop() ?? "";
+            if (s.startsWith("pantallas/") && s.toLowerCase().endsWith(".md") && !base.startsWith("_") && !touchedScreens.includes(s)) {
+              touchedScreens.push(s);
+            }
+          }
+        } catch (e) {
+          log.warn("chat", "la red de seguridad del documenter también falló", { err: e, projectId, sessionId });
+        }
+      }
     } catch (e: any) {
       log.error("chat", "fallo durante la respuesta del chat", { err: e, projectId, sessionId });
       clearInterval(heartbeat);
@@ -254,9 +292,11 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     // 5) Persistir SIEMPRE la respuesta (aunque el cliente se haya desconectado): así no se
     //    pierde nunca y aparece al recargar la conversación. Solo si hubo contenido real.
     const asstMsgId = `msg_${ulid().toLowerCase()}`;
-    // El documenter YA NO corre como agente de fondo tras cada mensaje: ahora es una TOOL (`documentar`)
-    // que el chat invoca durante el turno cuando se cierra algo que documentar (ver chatTools arriba). Así
-    // hay un único flujo y no se duplica con las tools de gobernanza por categoría.
+    // El documenter YA NO corre como agente de fondo tras CADA mensaje: es una TOOL (`documentar`) que el
+    // chat invoca durante el turno cuando se cierra algo que documentar (ver chatTools arriba) — así no se
+    // duplica con las tools de gobernanza por categoría. La única excepción es la red de seguridad de
+    // arriba: mientras el alcance siga abierto, si el turno no usó NINGUNA tool de escritura, se llama de
+    // todas formas para no perder en silencio lo que el usuario acaba de contar.
     const runId: string | null = null;
     if (full.trim()) {
       try {
