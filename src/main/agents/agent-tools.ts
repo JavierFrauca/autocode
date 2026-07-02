@@ -22,6 +22,11 @@ const kb = () => import("../tools/knowledge.js");
  * estas tools solo se la exponen al modelo.
  */
 
+/** Quita la sección "## Diagrama" (el Mermaid, bulto visual) de una ficha de dominios/, dejando Campos+Relaciones. */
+export function stripDiagramSection(body: string): string {
+  return body.replace(/##\s*Diagrama[\s\S]*$/i, "").trim();
+}
+
 /** Cuenta los errores de una salida de tsc ("Found N errors" o, en su defecto, los "error TSxxxx"). */
 export function countTscErrors(output: string): number {
   if (!output) return 0;
@@ -192,6 +197,45 @@ function buildKnowledgeTools(cfg: AppConfig, projectId: string): ChatTool[] {
       },
     },
     {
+      name: "listar_dominios",
+      description:
+        "Lista TODAS las entidades del modelo de datos (dominios/) con sus campos y relaciones. Llámalo " +
+        "AL EMPEZAR el dominio: cada entidad necesita su `domain` (entidad+puerto) y su `infrastructure` " +
+        "(repositorio en src/repos/); cada relación listada debe reflejarse en el repositorio (clave " +
+        "foránea + método de consulta relacionado — p.ej. si 'Un Pedido pertenece a un Cliente' → " +
+        "`listarPorClienteId`).",
+      parameters: { type: "object", properties: {} },
+      run: async () => {
+        const { resolveProjectRoot } = await import("./mockup.js");
+        const rootPath = await resolveProjectRoot(projectId);
+        const dir = path.join(rootPath, "dominios");
+        let names: string[] = [];
+        try {
+          names = (await fs.readdir(dir)).filter((n) => n.toLowerCase().endsWith(".md") && !n.startsWith("_"));
+        } catch {
+          return "(este proyecto aún no tiene entidades definidas en dominios/)";
+        }
+        if (!names.length) return "(este proyecto aún no tiene entidades definidas en dominios/)";
+        const { findOneSidedRelations } = await import("./domain-relations.js");
+        const parts: string[] = [];
+        const docs: { slug: string; body: string }[] = [];
+        for (const name of names.sort()) {
+          let body = "";
+          try { body = await fs.readFile(path.join(dir, name), "utf-8"); } catch { continue; }
+          docs.push({ slug: name.replace(/\.md$/i, ""), body });
+          parts.push(`### dominios/${name}\n${stripDiagramSection(body)}`);
+        }
+        const avisos = findOneSidedRelations(docs);
+        const bloqueAvisos = avisos.length
+          ? `\n\n⚠️ AVISOS DE COHERENCIA (relaciones que solo aparecen en un fichero — revísalas antes de dar por buena la entidad):\n${avisos.map((a) => `- ${a.mensaje}`).join("\n")}`
+          : "";
+        return (
+          "Entidades del dominio. Cada una necesita su `domain`+`repo`; cada relación debe reflejarse en " +
+          "el repositorio (clave foránea + método de consulta):\n\n" + parts.join("\n\n---\n\n") + bloqueAvisos
+        );
+      },
+    },
+    {
       name: "actualizar_maqueta",
       description:
         "Actualiza la MAQUETA (.preview.html) de una pantalla con el HTML que refleja lo que has construido. " +
@@ -231,8 +275,8 @@ function buildBuildTools(ws: string): ChatTool[] {
     {
       name: "instalar_dependencias",
       description:
-        "Instala las dependencias declaradas en package.json de forma aislada (Docker). Llámalo tras " +
-        "crear/editar el package.json o cuando compilar diga 'Cannot find module'.",
+        "Instala las dependencias declaradas en package.json. Llámalo tras crear/editar el " +
+        "package.json o cuando compilar diga 'Cannot find module'.",
       parameters: { type: "object", properties: {} },
       run: async () => {
         const r = await ensureAppDeps(ws, { force: true });
@@ -258,13 +302,13 @@ function buildBuildTools(ws: string): ChatTool[] {
     {
       name: "ejecutar_tests",
       description:
-        "Ejecuta la suite de tests (vitest) en aislamiento. Devuelve cuántos pasan/fallan y el detalle " +
-        "de los que fallan. Los tests son de QA y NO se pueden editar: haz que tu código los satisfaga.",
+        "Ejecuta la suite de tests (vitest). Devuelve cuántos pasan/fallan y el detalle de los que " +
+        "fallan. Los tests son de QA y NO se pueden editar: haz que tu código los satisfaga.",
       parameters: { type: "object", properties: {} },
       run: async () => {
         const v = await runVitest(ws);
         if (!v.ran) return `No se pudieron ejecutar los tests: ${v.error ?? "error desconocido"}`;
-        const head = `${v.passed}/${v.total} pasan, ${v.failed} fallan${v.sandbox === "docker" ? " (contenedor aislado)" : ""}.`;
+        const head = `${v.passed}/${v.total} pasan, ${v.failed} fallan.`;
         const fails = v.tests
           .filter((t) => t.status === "failed")
           .slice(0, 12)

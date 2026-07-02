@@ -46,3 +46,9 @@ server.registerTool(
 - Cada tool devuelve `{ content: [{ type: "text", text }] }` (usa `asText`); errores con `isError: true`.
 - Valida la entrada con Zod (`inputSchema`).
 - **stdio**: NUNCA escribas a `stdout` (rompe el protocolo) — los logs van a `stderr` (`console.error`).
+
+## Persistencia (opcional)
+
+Si tus tools necesitan recordar algo entre llamadas, hay un patrón listo con SQLite embebido en `src/db.ts`
++ `src/repos/` (mismo patrón *repository* que el resto de andamiajes de AutoCode): llama a `initDb()` una
+vez en `server.ts` y accede a los datos siempre a través de un repositorio, nunca con SQL suelto.

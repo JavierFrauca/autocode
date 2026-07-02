@@ -48,6 +48,20 @@ export interface GenerationConfig {
 export const EMBEDDINGS_MODEL = "bge-m3";
 export const EMBEDDINGS_DIM = 1024;
 
+/**
+ * Estado de una entrada del catálogo CERRADO de MCPs (ver `src/main/mcp/catalog.ts`): el catálogo en sí
+ * NO lo edita el usuario (son entradas curadas por AutoCode, con sus ventajas/inconvenientes explicados
+ * en la ficha) — esto solo guarda si el usuario la activó y los valores que rellenó (p.ej. una clave)
+ * para las que la necesiten.
+ */
+export interface McpServerConfig {
+  /** Coincide con el `id` de una entrada de `MCP_CATALOG`. */
+  id: string;
+  activo: boolean;
+  /** Valores que el usuario ha rellenado para las variables que la entrada declara en `envRequerido`. */
+  env?: Record<string, string>;
+}
+
 export interface AppConfig {
   generation: GenerationConfig;
   projectsRoot: string;
@@ -56,6 +70,7 @@ export interface AppConfig {
     promptEditor?: boolean;
     docHistory?: boolean;
   };
+  mcpServers?: McpServerConfig[];
 }
 
 export interface Project {

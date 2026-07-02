@@ -10,6 +10,11 @@ import { z } from "zod";
  *  - Cada tool: `inputSchema` con Zod (validación + descripción de cada campo) y un handler async.
  *  - Devuelve SIEMPRE `{ content: [{ type: "text", text }] }` (usa `asText`); errores con `isError: true`.
  *  - En stdio NO escribas a stdout (rompe el protocolo): los logs van a stderr.
+ *
+ * PERSISTENCIA (opcional): si tus tools necesitan recordar algo entre llamadas (no todas lo necesitan —
+ * muchos MCP son proxies sin estado), hay un patrón listo con SQLite embebido en `db.ts` + `repos/`
+ * (mismo patrón repository que el resto de andamiajes de AutoCode): llama a `initDb()` una vez aquí y
+ * usa `repos.items` como ejemplo de acceso a datos.
  */
 
 /** Respuesta de texto estándar de una tool MCP. */

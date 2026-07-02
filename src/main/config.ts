@@ -78,6 +78,7 @@ export function mergeWithDefaults(partial: Record<string, unknown>): AppConfig {
     projectsRoot: (partial.projectsRoot as string) ?? DEFAULT_CONFIG.projectsRoot,
     qdrantUrl: (partial.qdrantUrl as string) ?? DEFAULT_CONFIG.qdrantUrl,
     ...(partial.advanced ? { advanced: partial.advanced as AppConfig["advanced"] } : {}),
+    ...(Array.isArray(partial.mcpServers) ? { mcpServers: partial.mcpServers as AppConfig["mcpServers"] } : {}),
   };
 }
 

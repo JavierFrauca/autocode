@@ -1,15 +1,21 @@
 import path from "node:path";
-import { log } from "./log.js";
+import { extractInIsolation } from "./mcp/internal-extractor.js";
 
 /**
  * Clasificación y extracción de texto de adjuntos. Puro (sin BD/LLM) para poder testearlo.
+ *
+ * Los formatos de RIESGO (PDF/DOCX/ZIP — requieren parsers de binarios/comprimidos sobre contenido NO
+ * confiable) se delegan al MCP interno de extracción (`mcp-internal/extractor/`), que corre en su PROPIO
+ * proceso: un fichero corrupto o malicioso se lleva por delante ese proceso hijo, nunca este. Los
+ * formatos triviales (texto plano) se resuelven aquí mismo, sin el coste de un proceso aparte.
  */
 
 export type AttachKind = "resource" | "document";
 
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".ico", ".bmp"]);
-const DOC_EXT = new Set([".md", ".txt", ".xml", ".xsd", ".json", ".csv", ".yaml", ".yml", ".html", ".pdf", ".docx"]);
+const DOC_EXT = new Set([".md", ".txt", ".xml", ".xsd", ".json", ".csv", ".yaml", ".yml", ".html", ".pdf", ".docx", ".zip"]);
 const CODE_FENCE = new Set([".xml", ".xsd", ".json", ".csv", ".yaml", ".yml", ".html"]);
+const RIESGO = new Set([".pdf", ".docx", ".zip"]);
 const MAX_TEXT = 200_000;
 
 /** Dónde va el adjunto por su extensión: imagen→recurso, texto/doc→documento, otro→null. */
@@ -23,30 +29,10 @@ export function classify(filename: string): AttachKind | null {
 /** Extrae texto/markdown del fichero según su tipo. */
 export async function extractText(filename: string, buffer: Buffer): Promise<string> {
   const ext = path.extname(filename).toLowerCase();
+  if (RIESGO.has(ext)) return extractInIsolation(filename, buffer);
   if (ext === ".md" || ext === ".txt") return buffer.toString("utf-8").slice(0, MAX_TEXT);
   if (CODE_FENCE.has(ext)) {
     return "```" + ext.slice(1) + "\n" + buffer.toString("utf-8").slice(0, MAX_TEXT) + "\n```";
-  }
-  if (ext === ".pdf") {
-    try {
-      const { PDFParse } = await import("pdf-parse");
-      const parser = new (PDFParse as any)({ data: new Uint8Array(buffer) });
-      const r = await parser.getText();
-      return ((r?.text ?? "") as string).trim().slice(0, MAX_TEXT) || "(PDF sin texto extraíble)";
-    } catch (e: any) {
-      log.warn("attachments", "fallo extrayendo PDF", { err: e });
-      return "(no se pudo leer el PDF)";
-    }
-  }
-  if (ext === ".docx") {
-    try {
-      const mammoth: any = await import("mammoth");
-      const r = await mammoth.extractRawText({ buffer });
-      return ((r?.value ?? "") as string).trim().slice(0, MAX_TEXT) || "(documento vacío)";
-    } catch (e: any) {
-      log.warn("attachments", "fallo extrayendo docx", { err: e });
-      return "(no se pudo leer el documento)";
-    }
   }
   return buffer.toString("utf-8").slice(0, MAX_TEXT);
 }

@@ -37,13 +37,12 @@ test("uno mas uno", () => { expect(1 + 1).toBe(2); });
 test("cadena", () => { expect("ab".length).toBe(2); });
 `,
     );
-    const r = await runVitest(ws, { timeoutMs: 60_000, sandbox: "host" });
+    const r = await runVitest(ws, { timeoutMs: 60_000 });
     expect(r.ran).toBe(true);
     expect(r.success).toBe(true);
     expect(r.total).toBe(2);
     expect(r.passed).toBe(2);
     expect(r.failed).toBe(0);
-    expect(r.sandbox).toBe("host");
   }, 90_000);
 
   test("workspace con un fallo => success=false y el fallo se reporta", async () => {
@@ -54,7 +53,7 @@ test("pasa", () => { expect(2 + 2).toBe(4); });
 test("falla a proposito", () => { expect(2 - 1).toBe(5); });
 `,
     );
-    const r = await runVitest(ws, { timeoutMs: 60_000, sandbox: "host" });
+    const r = await runVitest(ws, { timeoutMs: 60_000 });
     expect(r.ran).toBe(true);
     expect(r.success).toBe(false);
     expect(r.passed).toBe(1);
@@ -79,9 +78,8 @@ test("falla a proposito", () => { expect(2 - 1).toBe(5); });
     );
     // En monopuesto los node_modules viven en el host (ensureAppDeps). Si aún no están instalados, los
     // tests quedan inconclusos (ran:false) sin bloquear el verde — no se instala nada por sorpresa.
-    const r = await runVitest(ws, { sandbox: "host" });
+    const r = await runVitest(ws);
     expect(r.ran).toBe(false);
-    expect(r.sandbox).toBe("host");
     expect(r.error).toMatch(/node_modules/i);
   }, 30_000);
 });

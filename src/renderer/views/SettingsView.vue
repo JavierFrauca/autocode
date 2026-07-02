@@ -175,8 +175,51 @@ const stepStatus = computed(() => ({
     : "pending",
 }));
 
+// ── Biblioteca de MCP ("vitaminar" el chat) ──────────────────────────────────
+// Catálogo CERRADO: no hay forma de añadir uno propio desde aquí, solo activar/rellenar los de la lista.
+interface McpEntrada {
+  id: string; nombre: string; descripcion: string; ventajas: string[]; inconvenientes: string[];
+  estado: "disponible" | "pendiente_de_validar" | "degradado" | "retirado";
+  envRequerido: { clave: string; etiqueta: string; ayuda?: string; relleno: boolean }[];
+  activo: boolean; activable: boolean;
+}
+const mcpEntradas = ref<McpEntrada[]>([]);
+const mcpEnvDraft = reactive<Record<string, Record<string, string>>>({});
+const mcpGuardando = ref<string | null>(null);
+const mcpError = ref<string | null>(null);
+
+const MCP_ESTADO_LABEL: Record<McpEntrada["estado"], string> = {
+  disponible: "Disponible",
+  pendiente_de_validar: "Aún no disponible (en validación)",
+  degradado: "Con problemas conocidos",
+  retirado: "Retirado",
+};
+
+async function loadMcpCatalog() {
+  try {
+    const r = await api.mcpCatalog();
+    mcpEntradas.value = r.entradas;
+    for (const e of r.entradas) mcpEnvDraft[e.id] ??= {};
+  } catch (e: any) {
+    mcpError.value = e?.message ?? "No se pudo cargar la biblioteca de MCP";
+  }
+}
+
+async function toggleMcp(entrada: McpEntrada) {
+  mcpGuardando.value = entrada.id;
+  mcpError.value = null;
+  try {
+    await api.setMcpServer(entrada.id, !entrada.activo, mcpEnvDraft[entrada.id]);
+    await loadMcpCatalog();
+  } catch (e: any) {
+    mcpError.value = e?.message ?? "No se pudo guardar";
+  } finally {
+    mcpGuardando.value = null;
+  }
+}
+
 onMounted(async () => {
-  await Promise.all([load(), loadProviders()]);
+  await Promise.all([load(), loadProviders(), loadMcpCatalog()]);
   // Cloud sin modelos guardados (instalación nueva) → usa los preseleccionados del proveedor.
   if (form.generation.mode === "cloud" && (!form.generation.mainModel || !form.generation.fastModel)) {
     applyPresetModels(form.generation.provider);
@@ -437,6 +480,62 @@ onMounted(async () => {
         </div>
       </div>
 
+      <!-- Biblioteca de MCP: ampliar el chat, cerrada y curada (sin opción de añadir uno propio). Va
+           DENTRO de settings-content (no como hermana de settings-shell): el layout general envuelve la
+           vista en un contenedor flex, así que una segunda raíz aquí se pintaba como columna aparte. -->
+      <section class="mcp-library">
+        <div class="mcp-library-head">
+          <h2>Ampliar el chat</h2>
+          <p class="muted">
+            Capacidades adicionales que puedes activar para el chat, revisadas por AutoCode. No puedes añadir
+            otras por tu cuenta — así no tienes que juzgar tú si algo de fuera es de fiar.
+          </p>
+        </div>
+
+        <div v-if="mcpError" class="badge bad" style="margin-bottom:12px">{{ mcpError }}</div>
+
+        <div class="mcp-card" v-for="entrada in mcpEntradas" :key="entrada.id">
+          <div class="mcp-card-head">
+            <div>
+              <strong>{{ entrada.nombre }}</strong>
+              <span class="badge" :class="entrada.estado === 'disponible' ? 'ok' : 'bad'" style="margin-left:8px">
+                {{ MCP_ESTADO_LABEL[entrada.estado] }}
+              </span>
+            </div>
+            <button
+              class="btn"
+              :class="entrada.activo ? 'ghost' : 'primary'"
+              :disabled="!entrada.activable || mcpGuardando === entrada.id"
+              @click="toggleMcp(entrada)"
+            >
+              {{ mcpGuardando === entrada.id ? "Guardando…" : entrada.activo ? "Desactivar" : "Activar" }}
+            </button>
+          </div>
+          <p class="muted">{{ entrada.descripcion }}</p>
+          <div class="mcp-pros-cons">
+            <div>
+              <strong class="mcp-pros-cons-title ok">Ventajas</strong>
+              <ul><li v-for="v in entrada.ventajas" :key="v">{{ v }}</li></ul>
+            </div>
+            <div>
+              <strong class="mcp-pros-cons-title bad">Inconvenientes</strong>
+              <ul><li v-for="v in entrada.inconvenientes" :key="v">{{ v }}</li></ul>
+            </div>
+          </div>
+          <div v-if="entrada.envRequerido.length" class="mcp-env">
+            <label v-for="campo in entrada.envRequerido" :key="campo.clave">
+              {{ campo.etiqueta }}
+              <input
+                type="password"
+                v-model="mcpEnvDraft[entrada.id][campo.clave]"
+                :placeholder="campo.relleno ? '••••••••  (ya guardada)' : campo.ayuda ?? ''"
+              />
+            </label>
+          </div>
+        </div>
+
+        <p v-if="!mcpEntradas.length" class="muted">Cargando biblioteca…</p>
+      </section>
     </div>
   </div>
 </template>
@@ -698,4 +797,20 @@ onMounted(async () => {
   color: var(--green);
   margin-bottom: 16px;
 }
+
+.mcp-library { max-width: 720px; margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--border); }
+.mcp-library-head { margin-bottom: 18px; }
+.mcp-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg, 12px);
+  padding: 18px 20px; margin-bottom: 14px;
+}
+.mcp-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.mcp-pros-cons { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 10px; }
+.mcp-pros-cons-title { font-size: 12px; }
+.mcp-pros-cons-title.ok { color: var(--green); }
+.mcp-pros-cons-title.bad { color: var(--red); }
+.mcp-pros-cons ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; color: var(--text-muted); }
+.mcp-env { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.mcp-env label { font-size: 12px; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px; }
+.mcp-env input { padding: 8px 10px; border-radius: var(--r-sm, 8px); border: 1px solid var(--border); background: var(--bg); color: var(--text); }
 </style>

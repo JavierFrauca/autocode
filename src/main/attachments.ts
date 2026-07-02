@@ -10,6 +10,7 @@ import { chat } from "./llm/client.js";
 import { saveProjectDocument } from "./papers/save.js";
 import { nextDocNumberInDir } from "./papers/numbering.js";
 import { loadPrompt } from "./prompts.js";
+import { classify, extractText } from "./attachments-extract.js";
 import {
   composeTechnicalPaper,
   technicalDocPaths,
@@ -122,7 +123,28 @@ export async function saveReferenceDoc(opts: {
 
 const PRIVATE_HOST = /^(localhost$|127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0$|::1$|172\.(1[6-9]|2\d|3[01])\.)/i;
 
-/** Descarga una URL pública y la convierte a markdown legible. Guardrail SSRF mínimo. */
+// Descargas de especificaciones reales (ISO 20022, Facturae…) pueden pesar unos MB — mismo orden de
+// magnitud que el límite de adjuntos manuales (routes/attach.ts). Evita agotar memoria con una URL enorme.
+const MAX_DOWNLOAD = 50 * 1024 * 1024;
+
+/** Content-type → extensión, para cuando la URL no trae extensión reconocible en la ruta. */
+const CONTENT_TYPE_EXT: Record<string, string> = {
+  "application/pdf": ".pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+  "application/zip": ".zip",
+  "application/x-zip-compressed": ".zip",
+  "application/xml": ".xml",
+  "text/xml": ".xml",
+  "text/csv": ".csv",
+  "application/json": ".json",
+};
+
+/**
+ * Descarga una URL pública. El TIPO REAL manda sobre "toda URL es una página web": si el content-type o
+ * la extensión indican un formato que ya sabemos leer bien (PDF, DOCX, XML/XSD, CSV, ZIP…), se reutiliza
+ * el MISMO extractor que los adjuntos manuales (`attachments-extract.ts`) — nunca se fuerza por el
+ * conversor de HTML, que mutilaría un binario o un esquema XML. Guardrail SSRF + límite de tamaño.
+ */
 export async function fetchUrlAsMarkdown(url: string): Promise<{ title: string; markdown: string }> {
   let u: URL;
   try { u = new URL(url); } catch { throw new Error("la dirección no es válida"); }
@@ -131,12 +153,31 @@ export async function fetchUrlAsMarkdown(url: string): Promise<{ title: string; 
 
   const res = await fetch(u.toString(), {
     headers: { "user-agent": "AutoCode/0.1 (+https://autocode.local)" },
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) throw new Error(`la página respondió con error ${res.status}`);
-  const html = await res.text();
-  const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] ?? u.hostname).trim().slice(0, 120);
 
+  const declaredLen = Number(res.headers.get("content-length") ?? "0");
+  if (declaredLen > MAX_DOWNLOAD) throw new Error("el fichero es demasiado grande para descargarlo (máx. 50 MB)");
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.byteLength > MAX_DOWNLOAD) throw new Error("el fichero es demasiado grande para descargarlo (máx. 50 MB)");
+
+  const contentType = (res.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  const extFromUrl = path.extname(u.pathname).toLowerCase();
+  const ext = extFromUrl || CONTENT_TYPE_EXT[contentType] || "";
+
+  if (ext && ext !== ".html" && ext !== ".htm" && classify(`f${ext}`) === "document") {
+    // `extractText` decide el lector mirando la extensión del NOMBRE, así que si la URL no la trae en la
+    // ruta (p.ej. "/download?id=123" detectado por content-type), hay que añadírsela nosotros aquí.
+    const base = path.basename(u.pathname) || "documento";
+    const filename = extFromUrl ? base : `${base}${ext}`;
+    const markdown = await extractText(filename, buf);
+    return { title: filename, markdown };
+  }
+
+  // Por defecto: página HTML → markdown legible (comportamiento previo).
+  const html = buf.toString("utf-8");
+  const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] ?? u.hostname).trim().slice(0, 120);
   const cleaned = html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "")

@@ -4,9 +4,10 @@ El plan debe ser ejecutable por un agente de programación que tiene acceso a pl
 
 CÓMO CONOCER EL PROYECTO (tus tools)
 
-Tienes tools para CONSULTAR la documentación; úsalas para entender qué hay que construir antes de planificar (no necesitas que esté todo en el mensaje). Empieza listando y leyendo decisiones y reglas; mira pantallas y la biblioteca según lo necesites; y SOLO cuando tengas el contexto, devuelve el JSON del plan.
+Tienes tools para CONSULTAR la documentación; úsalas para entender qué hay que construir antes de planificar (no necesitas que esté todo en el mensaje). Empieza listando y leyendo decisiones, reglas y dominios; mira pantallas y la biblioteca según lo necesites; y SOLO cuando tengas el contexto, devuelve el JSON del plan.
 - **Decisiones de arquitectura** — `decisiones_listar`, `decisiones_leer`: los ADR (tipo de app, login, roles, stack, formatos). LÉELOS SIEMPRE: definen el esqueleto del plan.
 - **Reglas de negocio** — `reglas_listar`, `reglas_leer`: las RN; la lógica que hay que implementar y verificar (criterios de aceptación).
+- **Modelo de datos** — `dominios_listar`, `dominios_leer`: las entidades del negocio (campos, relaciones). LÉELOS SIEMPRE, igual que las decisiones: CADA entidad debe generar su grupo de tareas `domain`→`application`→`infrastructure` (no solo las que se mencionen de pasada en una regla o pantalla), y cada relación entre entidades debe quedar reflejada en la tarea de `infrastructure` (el repositorio).
 - **Pantallas** — `pantallas_listar`, `pantallas_leer`: qué vistas hay y qué muestran/hacen → tareas de UI.
 - **Patrones del proyecto** — `patrones_listar`, `patrones_leer`: convenciones propias del proyecto, si las hay.
 - **Media** — `media_listar`: imágenes disponibles (logo, capturas) por si una pantalla las usa.

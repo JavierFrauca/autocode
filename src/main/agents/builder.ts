@@ -206,12 +206,18 @@ function buildIntro(opts: BuilderOptions): string {
     "INFRAESTRUCTURA PERMANENTE — NO la recrees ni la borres: src/renderer/src/App.vue (shell con menú lateral + " +
     "cabecera + router), src/renderer/src/router.ts (rutas), src/renderer/src/components/AppSidebar.vue (menú) y la " +
     "vista placeholder src/renderer/src/views/InicioView.vue. (Las apps de ESCRITORIO NO llevan login ni auditoría: " +
-    "son monopuesto/locales.) NO cambies la estructura ni el build. Tus pasos: (1) instalar_dependencias, (2) compilar " +
-    "para confirmar el verde de partida, (3) AÑADIR ENCIMA: el dominio y los casos de uso en src/main (entidades, " +
-    "servicios, y el IPC en src/main para exponerlos por preload), y las PANTALLAS reales como VISTAS nuevas en " +
-    "src/renderer/src/views, registrándolas en router.ts CON `meta.menu` (icono SVG + orden) — el MENÚ LATERAL se " +
-    "DERIVA del router automáticamente, NO toques AppSidebar.vue. MANTÉN el renderizado y la " +
-    "CSP del index.html; no toques App.vue (el shell) salvo detalles de marca. " +
+    "son monopuesto/locales.) Trae YA persistencia con SQLite embebido (better-sqlite3, sin instalación): " +
+    "src/main/db.ts (initDb, fichero en app.getPath('userData')) y src/main/repos/ (patrón repository — " +
+    "items.repo.ts de ejemplo + index.ts como composition root), con su IPC de ejemplo ya cableado en " +
+    "src/main/index.ts y expuesto en preload. NO cambies la estructura ni el build. Tus pasos: " +
+    "(1) instalar_dependencias, (2) compilar para confirmar el verde de partida, (3) AÑADIR el dominio real: " +
+    "un fichero `<entidad>.repo.ts` por entidad en src/main/repos (mismo patrón que items.repo.ts) registrado en " +
+    "repos/index.ts, sus casos de uso y el IPC en src/main/index.ts para exponerlos por preload — y ELIMINAR el " +
+    "demo 'items' del todo (borrar src/main/repos/items.repo.ts, quitar 'items' de repos/index.ts, la tabla items " +
+    "de src/main/db.ts, los canales ipcMain.handle('items:...') de index.ts y el bloque items de preload/index.ts); " +
+    "y las PANTALLAS reales como VISTAS nuevas en src/renderer/src/views, registrándolas en router.ts CON " +
+    "`meta.menu` (icono SVG + orden) — el MENÚ LATERAL se DERIVA del router automáticamente, NO toques " +
+    "AppSidebar.vue. MANTÉN el renderizado y la CSP del index.html; no toques App.vue (el shell) salvo detalles de marca. " +
     "IMPORTANTE: ahora mismo la vista de inicio (views/InicioView.vue) es un PLACEHOLDER. Tu entrega NO está hecha " +
     "mientras siga el placeholder: DEBES reemplazar InicioView.vue por la primera pantalla real (y crear el resto de " +
     "vistas) de la app descrita en el plan. Compilar en verde NO es el objetivo: el objetivo es que la app MUESTRE y " +
@@ -380,7 +386,7 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
     if (compiledGreen && anyTests) vitest = await runVitest(ws);
     lastVitest = vitest;
 
-    // Si las pruebas existentes NO se pudieron ejecutar (p.ej. requieren Docker y no hay) o no había
+    // Si las pruebas existentes NO se pudieron ejecutar (p.ej. node_modules no instalado aún) o no había
     // ninguna, son INCONCLUSAS: no marcan rojo por sí solas (el "faltan tests" lo lleva testsPending).
     const testsInconclusive = anyTests && (!vitest || !vitest.ran || vitest.total === 0);
     const testsGreen = !anyTests || testsInconclusive

@@ -12,6 +12,8 @@ import { buildChatTools } from "../chat/tools.js";
 import { buildGovernanceChatTools } from "../tools/governance-tools.js";
 import { documentSession } from "../agents/documenter.js";
 import { formatScopeForChat, getProjectScope } from "../agents/scope.js";
+import { getActiveMcpTools } from "../mcp/client.js";
+import { parseSearchResults, type SearchResultItem } from "../mcp/search-results.js";
 import { log } from "../log.js";
 
 /** ¿El mensaje del usuario es una confirmación afirmativa? (para "dar por válida" la app). */
@@ -97,6 +99,10 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     // mostrar su boceto en línea ("ver las pantallas mientras se trabajan"). Fuera del try porque se
     // persiste/emite después de cerrarlo.
     const touchedScreens: string[] = [];
+    // Resultados de búsqueda web de ESTE turno (si el chat usó el MCP de búsqueda): se devuelven
+    // estructurados para pintar una tarjeta por resultado con un botón "Adjuntar", en vez de dejar que
+    // el usuario tenga que pedirle la URL al modelo o copiarla a mano.
+    const searchResults: SearchResultItem[] = [];
     try {
       // 0) Idempotencia: si ya existe un mensaje con este id, es un reenvío de la misma petición.
       //    Cortamos sin insertar nada ni volver a llamar al modelo (esto evitaba la triplicación).
@@ -156,6 +162,27 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       }
       baseMessages.push(...history.map((h) => ({ role: h.role as ChatMessage["role"], content: h.content })));
 
+      // MCPs de la biblioteca cerrada que el usuario tenga activos (búsqueda web, y lo que se añada más
+      // adelante): "vitaminan" el chat sin tocar este fichero — best-effort, nunca rompe el turno si un
+      // MCP falla al conectar (getActiveMcpTools ya degrada con gracia, pero por si acaso).
+      const mcpTools = await getActiveMcpTools(cfg).catch((e) => {
+        log.warn("chat", "no se pudieron cargar las tools de los MCP activos", { err: e });
+        return [];
+      });
+      // Cualquier tool MCP literalmente llamada "search" (por convención del propio MCP) se envuelve para
+      // capturar sus resultados estructurados además de devolvérselos al modelo tal cual — best-effort:
+      // si el formato no es el esperado, `parseSearchResults` devuelve [] y no pasa nada (el modelo sigue
+      // teniendo el texto crudo para leerlo en prosa).
+      for (const t of mcpTools) {
+        if (!t.name.endsWith("__search")) continue;
+        const originalRun = t.run;
+        t.run = async (args: any): Promise<string> => {
+          const raw = await originalRun(args);
+          searchResults.push(...parseSearchResults(raw));
+          return raw;
+        };
+      }
+
       // El chat (1) CONSULTA la biblioteca y los papers para responder con criterio (p.ej. "¿qué
       // autenticación puedes usar?" → busca y contesta con lo que SÍ hay) y (2) GOBIERNA los ficheros del
       // proyecto por categoría: crear/editar/borrar decisiones, reglas, pantallas y patrones; listar/borrar
@@ -165,6 +192,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       const chatTools = [
         ...buildChatTools(cfg, projectId, { readOnly: true }),
         ...buildGovernanceChatTools(cfg, projectId),
+        ...mcpTools,
         // El documenter integrado como TOOL: extracción estructurada de decisiones/reglas/pantallas de la
         // conversación + persistencia (numera ADR/RN sin duplicar, auto-maqueta pantallas). El chat la
         // llama cuando se cierra algo que documentar (ya no corre como agente de fondo tras cada mensaje).
@@ -302,7 +330,11 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       try {
         await db().insert(schema.messages).values({
           id: asstMsgId, projectId, sessionId, role: "assistant", content: full,
-          metadata: { model, tokensIn, tokensOut, ...(touchedScreens.length ? { screens: touchedScreens } : {}) },
+          metadata: {
+            model, tokensIn, tokensOut,
+            ...(touchedScreens.length ? { screens: touchedScreens } : {}),
+            ...(searchResults.length ? { searchResults } : {}),
+          },
         });
       } catch (e) {
         log.warn("chat", "no se pudo guardar la respuesta del asistente", { err: e });
@@ -364,7 +396,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
 
     if (closed) return; // el socket ya está cerrado; la respuesta quedó guardada arriba
 
-    send("assistant", { id: asstMsgId, content: full, model, tokensIn, tokensOut, documenterRunId: runId, screens: touchedScreens });
+    send("assistant", { id: asstMsgId, content: full, model, tokensIn, tokensOut, documenterRunId: runId, screens: touchedScreens, searchResults });
     if (noticeId && noticeText) send("notice", { id: noticeId, content: noticeText });
     send("done", { ok: true, notice: !!noticeId });
     try { reply.raw.end(); } catch {}

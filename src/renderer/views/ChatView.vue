@@ -151,6 +151,33 @@ function openScreenInEditor(path: string): void {
   router.push(`/projects/${projectId.value}/screens?slug=${encodeURIComponent(screenSlugOf(path))}`);
 }
 
+// ── Resultados de búsqueda web embebidos en el chat ──────────────────────────
+// Cuando el chat usa el MCP de búsqueda, el servidor devuelve `metadata.searchResults` — se pinta una
+// tarjeta por resultado con un botón "Adjuntar" que lo descarga y registra como documento del proyecto
+// (mismo camino ya reforzado: detecta PDF/XSD/ZIP, límite de tamaño) sin que el usuario tenga que pedirle
+// la URL al modelo ni copiarla a mano.
+interface SearchResultado { titulo: string; url: string; descripcion: string }
+function messageSearchResults(m: any): SearchResultado[] {
+  const r = m?.metadata?.searchResults;
+  return Array.isArray(r) ? r : [];
+}
+const adjuntando = ref<Record<string, boolean>>({});
+const adjuntados = ref<Record<string, boolean>>({});
+const adjuntarError = ref<Record<string, string>>({});
+async function adjuntarResultado(url: string): Promise<void> {
+  if (!projectId.value || adjuntando.value[url] || adjuntados.value[url]) return;
+  adjuntando.value = { ...adjuntando.value, [url]: true };
+  adjuntarError.value = { ...adjuntarError.value, [url]: "" };
+  try {
+    await api.attachUrl(projectId.value, url);
+    adjuntados.value = { ...adjuntados.value, [url]: true };
+  } catch (e: any) {
+    adjuntarError.value = { ...adjuntarError.value, [url]: e?.message ?? "No se pudo adjuntar" };
+  } finally {
+    adjuntando.value = { ...adjuntando.value, [url]: false };
+  }
+}
+
 // Carga los bocetos de las pantallas que aparezcan en los mensajes (turno nuevo o historial).
 watch(messages, (list) => {
   for (const m of list) for (const p of messageScreens(m)) loadScreenPreview(p);
@@ -545,6 +572,25 @@ watch(projectId, loadSessions);
               </div>
               <div class="screen-hint">¿Hay que cambiar algo? Dímelo por el chat y lo actualizo.</div>
             </div>
+            <!-- Resultados de la búsqueda web de este turno -->
+            <div v-if="messageSearchResults(m).length" class="search-results">
+              <div v-for="r in messageSearchResults(m)" :key="r.url" class="search-card">
+                <div class="search-card-title">{{ r.titulo }}</div>
+                <div class="search-card-url">{{ r.url }}</div>
+                <p class="search-card-desc">{{ r.descripcion }}</p>
+                <div class="search-card-actions">
+                  <button
+                    class="btn"
+                    :class="adjuntados[r.url] ? 'ghost' : 'primary'"
+                    :disabled="adjuntando[r.url] || adjuntados[r.url]"
+                    @click="adjuntarResultado(r.url)"
+                  >
+                    {{ adjuntados[r.url] ? '✓ Adjuntado' : adjuntando[r.url] ? 'Adjuntando…' : 'Adjuntar' }}
+                  </button>
+                  <span v-if="adjuntarError[r.url]" class="search-card-error">{{ adjuntarError[r.url] }}</span>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- Sistema (errores) -->
@@ -869,6 +915,18 @@ watch(projectId, loadSessions);
   color: var(--text-muted);
 }
 .screen-hint { flex-basis: 100%; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.search-results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.search-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+}
+.search-card-title { font-weight: 500; font-size: 13px; }
+.search-card-url { font-size: 11px; color: var(--text-muted); word-break: break-all; margin-top: 2px; }
+.search-card-desc { font-size: 12px; color: var(--text-muted); margin: 6px 0 8px; }
+.search-card-actions { display: flex; align-items: center; gap: 10px; }
+.search-card-error { font-size: 11px; color: var(--red, #dc2626); }
 .phase-chip-inline {
   display: inline-flex;
   align-items: center;

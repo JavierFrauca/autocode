@@ -18,7 +18,9 @@ build/
 
 # ─── Empaquetado / instaladores ─────────────────────────────
 release/
-electron-builder.yml
+# Solo el de la raíz (config local/histórica); templates/electron-app/electron-builder.yml SÍ se versiona:
+# es parte del andamiaje dorado que se copia a cada app generada.
+/electron-builder.yml
 
 # ─── Binarios y recursos descargados bajo demanda ───────────
 # modelos de embeddings descargados
