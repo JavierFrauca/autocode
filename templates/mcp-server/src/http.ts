@@ -1,14 +1,28 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isAuthorized } from "./http-auth.js";
 import { buildServer } from "./server.js";
 
 /**
  * Entrada HTTP: expone el MCP por red (transporte Streamable HTTP) en POST /mcp. Modo SIN sesión
  * (stateless): cada petición construye su propio servidor+transporte. Útil para clientes remotos o
- * para integrarlo en una infraestructura web. Para producción, pon esto detrás de TLS y auth.
+ * para integrarlo en una infraestructura web.
+ *
+ * AUTENTICACIÓN: si `MCP_HTTP_TOKEN` está definida, toda petición debe traer ese token en
+ * `Authorization: Bearer <token>` o `X-API-Key` (ver `http-auth.ts`). Sin esa variable, el servidor
+ * arranca IGUAL (para no romper el uso local/desarrollo) pero avisa por stderr — no lo expongas en
+ * red sin definirla.
  */
 
 const PORT = Number(process.env.PORT ?? 3000);
+const TOKEN = process.env.MCP_HTTP_TOKEN;
+
+if (!TOKEN) {
+  console.error(
+    "[mcp] AVISO: MCP_HTTP_TOKEN no está definida — el transporte HTTP no exige autenticación. " +
+      "No expongas este servidor en una red sin definirla.",
+  );
+}
 
 /** Lee el cuerpo de la petición y lo parsea como JSON (el transporte usa el body ya parseado). */
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -28,6 +42,11 @@ const httpServer = createServer(async (req, res) => {
   if (req.method !== "POST") {
     res.writeHead(405, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "MCP (stateless) requiere POST en /mcp" }));
+    return;
+  }
+  if (!isAuthorized(req, TOKEN)) {
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "Falta o es inválido el token (Authorization: Bearer <token> o X-API-Key)" }));
     return;
   }
 

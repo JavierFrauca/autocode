@@ -40,7 +40,8 @@ ipcMain.handle("items:crear", (_e, nombre: string) => repos.items.crear(nombre))
 ipcMain.handle("items:borrar", (_e, id: number) => repos.items.borrar(id));
 
 app.whenReady().then(() => {
-  initDb(); // persistencia con SQLite embebido (better-sqlite3) — ver src/main/db.ts y src/main/repos
+  // persistencia con SQLite embebido (better-sqlite3) — ver src/main/db.ts y src/main/repos
+  initDb(join(app.getPath("userData"), "data.sqlite"));
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
