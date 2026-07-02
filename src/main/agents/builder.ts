@@ -184,7 +184,8 @@ function buildIntro(opts: BuilderOptions): string {
     "cambies SQLite por Postgres (SQLite es local; Postgres solo en producción). Tus pasos: (1) instalar_dependencias, " +
     "(2) compilar, (3) AÑADIR el dominio real: entidades/servicios y rutas API en src/ (adaptador→aplicación→dominio) " +
     "y ELIMINAR el demo 'items' del todo (borrar_fichero src/repos/items.repo.ts; quita `items` de src/repos/index.ts, " +
-    "la tabla items de src/db.ts y las rutas /api/items de src/routes.ts); y las PANTALLAS reales en web/src como VISTAS nuevas en web/src/views, " +
+    "la tabla items de src/db.ts y las rutas /api/items de src/routes.ts — y actualiza o borra cualquier test en " +
+    "tests/ que quede huérfano al referenciar 'items'); y las PANTALLAS reales en web/src como VISTAS nuevas en web/src/views, " +
     "registrándolas en router.ts CON `meta.menu` (icono SVG + orden) — el MENÚ LATERAL se DERIVA del router " +
     "automáticamente, NO toques AppSidebar.vue. Reemplaza la vista placeholder web/src/views/InicioView.vue " +
     "por la primera pantalla real. NO toques App.vue (el shell) salvo para detalles de marca. La app debe seguir " +
@@ -214,7 +215,8 @@ function buildIntro(opts: BuilderOptions): string {
     "un fichero `<entidad>.repo.ts` por entidad en src/main/repos (mismo patrón que items.repo.ts) registrado en " +
     "repos/index.ts, sus casos de uso y el IPC en src/main/index.ts para exponerlos por preload — y ELIMINAR el " +
     "demo 'items' del todo (borrar src/main/repos/items.repo.ts, quitar 'items' de repos/index.ts, la tabla items " +
-    "de src/main/db.ts, los canales ipcMain.handle('items:...') de index.ts y el bloque items de preload/index.ts); " +
+    "de src/main/db.ts, los canales ipcMain.handle('items:...') de index.ts, el bloque items de preload/index.ts, " +
+    "y BORRA tests/items.repo.test.ts — es un test de ejemplo SOLO sobre 'items', se queda huérfano al borrarlo); " +
     "y las PANTALLAS reales como VISTAS nuevas en src/renderer/src/views, registrándolas en router.ts CON " +
     "`meta.menu` (icono SVG + orden) — el MENÚ LATERAL se DERIVA del router automáticamente, NO toques " +
     "AppSidebar.vue. MANTÉN el renderizado y la CSP del index.html; no toques App.vue (el shell) salvo detalles de marca. " +
@@ -235,7 +237,8 @@ function buildIntro(opts: BuilderOptions): string {
     "(para 'Probar'); (d) tareas programadas en src/jobs.ts. NO añadas interfaz/SPA/Vue (es API pura). Tus pasos: " +
     "(1) instalar_dependencias, (2) compilar, (3) AÑADIR el dominio real: endpoints en src/routes.ts (reemplaza el CRUD " +
     "de ejemplo 'items' y el webhook de ejemplo), entidades/servicios por capas, y las tareas programadas reales en " +
-    "src/jobs.ts. Audita las acciones sensibles. NO cambies SQLite por Postgres (SQLite es local; Postgres en producción).";
+    "src/jobs.ts — actualiza o borra cualquier test en tests/ que quede huérfano al referenciar 'items'. Audita las " +
+    "acciones sensibles. NO cambies SQLite por Postgres (SQLite es local; Postgres en producción).";
 
   const parts: string[] = [
     `Vas a ${opts.repair ? "REPARAR" : "CONSTRUIR"} esta aplicación. Tipo de app: **${tipo}**.`,
