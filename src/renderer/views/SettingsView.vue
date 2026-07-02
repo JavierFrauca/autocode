@@ -4,7 +4,7 @@ import { api } from "../api";
 import { useAppStore } from "../stores";
 import {
   FolderOpen, Bot, CheckCircle, Cloud, Server, Sparkles, Zap, Search, Lock,
-  KeyRound, Plug, ChevronRight, ChevronLeft, CheckCheck, RefreshCw,
+  KeyRound, Plug, Puzzle, ChevronRight, ChevronLeft, CheckCheck, RefreshCw,
 } from "lucide-vue-next";
 
 const app = useAppStore();
@@ -65,6 +65,7 @@ const connecting = ref(false);
 const steps = [
   { id: "folder", title: "Carpeta de trabajo", Icon: FolderOpen },
   { id: "ai",     title: "Servidor de IA",     Icon: Bot },
+  { id: "mcp",    title: "Ampliar el chat",    Icon: Puzzle },
   { id: "verify", title: "Comprobar conexión", Icon: CheckCircle },
 ];
 
@@ -170,6 +171,9 @@ const verifyNames: Record<string, string> = {
 const stepStatus = computed(() => ({
   folder: form.projectsRoot ? "done" : "pending",
   ai: endpointReady.value && form.generation.mainModel && form.generation.fastModel ? "done" : "pending",
+  // Paso opcional: "done" en cuanto se activa algo, pero nunca "pendiente bloqueante" — no hace falta
+  // tocarlo para avanzar.
+  mcp: mcpEntradas.value.some((e) => e.activo) ? "done" : "pending",
   verify: verifyResults.value
     ? (["provider", "main", "fast"].every((k) => verifyResults.value?.[k]?.ok) ? "done" : "error")
     : "pending",
@@ -431,65 +435,23 @@ onMounted(async () => {
 
         <div class="step-actions">
           <button class="btn ghost" style="gap:5px" @click="currentStep = 0"><ChevronLeft :size="15" /> Anterior</button>
-          <button class="btn primary" style="gap:5px" @click="save().then(() => currentStep = 2)">Guardar y comprobar <ChevronRight :size="15" /></button>
+          <button class="btn primary" style="gap:5px" @click="save().then(() => currentStep = 2)">Guardar y continuar <ChevronRight :size="15" /></button>
         </div>
       </div>
 
-      <!-- Paso 2: Verificación -->
+      <!-- Paso 2: Ampliar el chat (biblioteca de MCP, cerrada y curada — sin opción de añadir uno
+           propio). Paso OPCIONAL: se puede avanzar sin activar nada. -->
       <div v-show="currentStep === 2" class="step-body">
         <div class="step-header">
-          <div class="step-header-icon"><CheckCircle :size="32" :stroke-width="1.5" /></div>
+          <div class="step-header-icon"><Puzzle :size="32" :stroke-width="1.5" /></div>
           <div>
-            <h2>Comprobar la conexión</h2>
-            <p class="muted">Vamos a asegurarnos de que todo funciona. La primera comprobación descarga el modelo de búsqueda (puede tardar un poco).</p>
+            <h2>Ampliar el chat</h2>
+            <p class="muted">
+              Capacidades adicionales que puedes activar para el chat, revisadas por AutoCode. No puedes añadir
+              otras por tu cuenta — así no tienes que juzgar tú si algo de fuera es de fiar. Es opcional: puedes
+              seguir sin activar ninguna.
+            </p>
           </div>
-        </div>
-
-        <button class="btn primary" @click="verify" :disabled="verifying" style="margin-bottom:20px; display:inline-flex; align-items:center; gap:7px">
-          <Plug :size="15" :stroke-width="2" />
-          {{ verifying ? "Comprobando…" : "Probar ahora" }}
-        </button>
-
-        <div v-if="verifyResults" class="verify-results">
-          <div class="verify-row" v-for="key in ['provider', 'main', 'fast', 'tools']" :key="key">
-            <div class="verify-row-main">
-              <span class="verify-dot" :class="verifyResults[key]?.ok ? 'ok' : 'error'" />
-              <div class="verify-info">
-                <strong class="verify-name">{{ verifyNames[key] }}</strong>
-                <span class="verify-model dim">{{ verifyResults[key]?.model || '—' }}</span>
-              </div>
-              <span class="badge" :class="verifyResults[key]?.ok ? 'ok' : 'bad'">
-                {{ verifyResults[key]?.ok ? 'OK' : 'Error' }}
-              </span>
-              <span class="dim" style="font-size:11px; min-width:60px; text-align:right">
-                {{ verifyResults[key]?.responseMs ? verifyResults[key].responseMs + ' ms' : '—' }}
-              </span>
-            </div>
-            <pre v-if="verifyResults[key]?.error" class="raw verify-error-inline">{{ verifyResults[key].error }}</pre>
-          </div>
-        </div>
-
-        <div v-if="verifyError" class="badge bad" style="margin-top:10px">{{ verifyError }}</div>
-
-        <div v-if="verifyResults && ['provider','main','fast'].every(k => verifyResults[k]?.ok)" class="success-banner">
-          <CheckCheck :size="20" :stroke-width="2.5" /> ¡Todo listo! Puedes crear tu primer proyecto.
-        </div>
-
-        <div class="step-actions">
-          <button class="btn ghost" style="gap:5px" @click="currentStep = 1"><ChevronLeft :size="15" /> Anterior</button>
-        </div>
-      </div>
-
-      <!-- Biblioteca de MCP: ampliar el chat, cerrada y curada (sin opción de añadir uno propio). Va
-           DENTRO de settings-content (no como hermana de settings-shell): el layout general envuelve la
-           vista en un contenedor flex, así que una segunda raíz aquí se pintaba como columna aparte. -->
-      <section class="mcp-library">
-        <div class="mcp-library-head">
-          <h2>Ampliar el chat</h2>
-          <p class="muted">
-            Capacidades adicionales que puedes activar para el chat, revisadas por AutoCode. No puedes añadir
-            otras por tu cuenta — así no tienes que juzgar tú si algo de fuera es de fiar.
-          </p>
         </div>
 
         <div v-if="mcpError" class="badge bad" style="margin-bottom:12px">{{ mcpError }}</div>
@@ -535,7 +497,57 @@ onMounted(async () => {
         </div>
 
         <p v-if="!mcpEntradas.length" class="muted">Cargando biblioteca…</p>
-      </section>
+
+        <div class="step-actions">
+          <button class="btn ghost" style="gap:5px" @click="currentStep = 1"><ChevronLeft :size="15" /> Anterior</button>
+          <button class="btn primary" style="gap:5px" @click="currentStep = 3">Siguiente <ChevronRight :size="15" /></button>
+        </div>
+      </div>
+
+      <!-- Paso 3: Verificación -->
+      <div v-show="currentStep === 3" class="step-body">
+        <div class="step-header">
+          <div class="step-header-icon"><CheckCircle :size="32" :stroke-width="1.5" /></div>
+          <div>
+            <h2>Comprobar la conexión</h2>
+            <p class="muted">Vamos a asegurarnos de que todo funciona. La primera comprobación descarga el modelo de búsqueda (puede tardar un poco).</p>
+          </div>
+        </div>
+
+        <button class="btn primary" @click="verify" :disabled="verifying" style="margin-bottom:20px; display:inline-flex; align-items:center; gap:7px">
+          <Plug :size="15" :stroke-width="2" />
+          {{ verifying ? "Comprobando…" : "Probar ahora" }}
+        </button>
+
+        <div v-if="verifyResults" class="verify-results">
+          <div class="verify-row" v-for="key in ['provider', 'main', 'fast', 'tools']" :key="key">
+            <div class="verify-row-main">
+              <span class="verify-dot" :class="verifyResults[key]?.ok ? 'ok' : 'error'" />
+              <div class="verify-info">
+                <strong class="verify-name">{{ verifyNames[key] }}</strong>
+                <span class="verify-model dim">{{ verifyResults[key]?.model || '—' }}</span>
+              </div>
+              <span class="badge" :class="verifyResults[key]?.ok ? 'ok' : 'bad'">
+                {{ verifyResults[key]?.ok ? 'OK' : 'Error' }}
+              </span>
+              <span class="dim" style="font-size:11px; min-width:60px; text-align:right">
+                {{ verifyResults[key]?.responseMs ? verifyResults[key].responseMs + ' ms' : '—' }}
+              </span>
+            </div>
+            <pre v-if="verifyResults[key]?.error" class="raw verify-error-inline">{{ verifyResults[key].error }}</pre>
+          </div>
+        </div>
+
+        <div v-if="verifyError" class="badge bad" style="margin-top:10px">{{ verifyError }}</div>
+
+        <div v-if="verifyResults && ['provider','main','fast'].every(k => verifyResults[k]?.ok)" class="success-banner">
+          <CheckCheck :size="20" :stroke-width="2.5" /> ¡Todo listo! Puedes crear tu primer proyecto.
+        </div>
+
+        <div class="step-actions">
+          <button class="btn ghost" style="gap:5px" @click="currentStep = 2"><ChevronLeft :size="15" /> Anterior</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -798,8 +810,6 @@ onMounted(async () => {
   margin-bottom: 16px;
 }
 
-.mcp-library { max-width: 720px; margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--border); }
-.mcp-library-head { margin-bottom: 18px; }
 .mcp-card {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg, 12px);
   padding: 18px 20px; margin-bottom: 14px;

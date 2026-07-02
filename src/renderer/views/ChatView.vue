@@ -335,25 +335,34 @@ function pushNote(content: string, error = false) {
 
 function pickFile() { fileInputEl.value?.click(); }
 
+// Varios ficheros de golpe: se procesan uno detrás de otro (no en paralelo) porque los documentos
+// técnicos numeran secuencialmente (DT-001, DT-002…) leyendo "el siguiente número" del disco — en
+// paralelo dos ficheros podrían leer el mismo número y pisarse. `tecnico` se fija UNA vez al principio
+// del lote (si no, tras el primer fichero se desactivaría y el resto no quedaría marcado como técnico).
 async function onFilePicked(e: Event) {
   const el = e.target as HTMLInputElement;
-  const f = el.files?.[0];
+  const files = Array.from(el.files ?? []);
   el.value = "";
-  if (!f) return;
+  if (!files.length) return;
   attaching.value = true;
+  const tecnico = techMode.value;
   try {
-    const r = await api.attachFile(projectId.value, f, { tecnico: techMode.value });
-    pushNote(
-      r.kind === "resource"
-        ? `📎 He guardado **${r.name}** en Recursos — lo usaré en el diseño de la app.`
-        : r.kind === "technical"
-          ? `📐 He registrado **${r.name}** como documento técnico — lo seguiré al pie de la letra al construir la app.`
-          : `📎 He guardado **${r.name}** en Documentos — lo tendré en cuenta como referencia.`,
-    );
-    techMode.value = false;
-  } catch (err: any) {
-    pushNote(`No pude adjuntar el archivo: ${err?.message ?? err}`, true);
+    for (const f of files) {
+      try {
+        const r = await api.attachFile(projectId.value, f, { tecnico });
+        pushNote(
+          r.kind === "resource"
+            ? `📎 He guardado **${r.name}** en Recursos — lo usaré en el diseño de la app.`
+            : r.kind === "technical"
+              ? `📐 He registrado **${r.name}** como documento técnico — lo seguiré al pie de la letra al construir la app.`
+              : `📎 He guardado **${r.name}** en Documentos — lo tendré en cuenta como referencia.`,
+        );
+      } catch (err: any) {
+        pushNote(`No pude adjuntar **${f.name}**: ${err?.message ?? err}`, true);
+      }
+    }
   } finally {
+    techMode.value = false;
     attaching.value = false;
   }
 }
@@ -622,7 +631,7 @@ watch(projectId, loadSessions);
       <!-- Input -->
       <div class="chat-input">
         <input
-          ref="fileInputEl" type="file" style="display:none" @change="onFilePicked"
+          ref="fileInputEl" type="file" multiple style="display:none" @change="onFilePicked"
           accept=".md,.txt,.xml,.xsd,.json,.csv,.yaml,.yml,.html,.pdf,.docx,.png,.jpg,.jpeg,.gif,.webp,.svg,.avif,.ico"
         />
         <div v-if="urlMode" class="attach-url-row">
@@ -638,7 +647,7 @@ watch(projectId, loadSessions);
           <button class="attach-btn" title="Cerrar" @click="urlMode = false"><X :size="16" /></button>
         </div>
         <div class="chat-input-row">
-          <button class="attach-btn" title="Adjuntar un archivo" :disabled="attaching || sending" @click="pickFile">
+          <button class="attach-btn" title="Adjuntar uno o varios archivos" :disabled="attaching || sending" @click="pickFile">
             <Paperclip :size="18" :stroke-width="2" />
           </button>
           <button class="attach-btn" :class="{ on: urlMode }" title="Adjuntar un enlace" :disabled="attaching || sending" @click="urlMode = !urlMode">

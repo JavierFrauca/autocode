@@ -9,7 +9,7 @@ pnpm-lock.yaml
 # ─── Salidas de compilación / build ─────────────────────────
 out/
 dist/
-build/
+# NO "build/": es el buildResources de electron-builder (build/icon.png), no una salida — se versiona.
 .output/
 .vite/
 .cache/
