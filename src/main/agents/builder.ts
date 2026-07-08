@@ -1,8 +1,9 @@
 import type { AppConfig, AppType } from "@shared";
 import { runToolLoop, type ChatMessage } from "../llm/client.js";
 import { loadPrompt } from "../prompts.js";
-import { buildAgentTools, countTscErrors } from "./agent-tools.js";
+import { buildAgentTools, countTscErrors, type BuildTracking } from "./agent-tools.js";
 import { listAppFiles, readAppFile } from "./code-workspace.js";
+import { listProjectScreens, resolveProjectRoot } from "./mockup.js";
 import { runVitest, typecheckApp, type VitestResult } from "./qa-exec.js";
 import { log } from "../log.js";
 
@@ -104,6 +105,10 @@ export interface BuilderResult {
   cycles: number;
   /** Al parar: la UI seguía siendo el placeholder (no se construyeron las pantallas reales). */
   uiPending: boolean;
+  /** Pantallas del proyecto cuya maqueta NUNCA se consultó con `leer_maqueta` en toda la construcción
+   *  (aviso, no bloquea): señal de que el agente pudo construirlas sin partir de su boceto. Vacío si no
+   *  aplica (apps sin UI, o fase de tests). */
+  mockupsUnread: string[];
 }
 
 /** Dependencias inyectables (para test): por defecto, el bucle de tools real y el prompt del disco. */
@@ -111,6 +116,9 @@ export interface BuilderDeps {
   toolLoop?: typeof runToolLoop;
   /** System prompt ya resuelto (evita tocar el disco/electron en test). */
   systemPrompt?: string;
+  /** Resolución de proyecto→carpeta y listado de pantallas para `mockupsUnread` (evita tocar la BD real en test). */
+  resolveRootPath?: typeof resolveProjectRoot;
+  listProjectScreens?: typeof listProjectScreens;
 }
 
 const MAX_GATE_CYCLES = 8;        // cuántas veces reabrimos al agente tras un gate en rojo
@@ -123,6 +131,25 @@ const STALL_LIMIT = 3;            // ciclos seguidos sin mejorar la métrica →
 const COMPILE_STALL_LIMIT = 6;
 // Nº de líneas iniciales del error que comparamos para detectar "sigue siendo el MISMO fallo".
 const ERROR_SIGNATURE_LINES = 3;
+
+/**
+ * Pantallas del proyecto cuya maqueta nunca se consultó con `leer_maqueta` en esta construcción. Solo
+ * aplica a apps con UI (electron/server) en la fase "app" (la fase "tests" no toca pantallas). Best-effort:
+ * si no se puede resolver el proyecto, no bloquea — devuelve vacío.
+ */
+export async function computeMockupsUnread(opts: BuilderOptions, tracking: BuildTracking, deps: BuilderDeps = {}): Promise<string[]> {
+  const hasUi = opts.appType === "electron" || opts.appType === "server";
+  if (!hasUi || opts.goal === "tests") return [];
+  const resolveRoot = deps.resolveRootPath ?? resolveProjectRoot;
+  const listScreens = deps.listProjectScreens ?? listProjectScreens;
+  try {
+    const rootPath = await resolveRoot(opts.projectId);
+    const screens = await listScreens(rootPath);
+    return screens.filter((s) => !tracking.mockupsConsultadas.has(s.rel)).map((s) => s.slug);
+  } catch {
+    return [];
+  }
+}
 
 /** Firma corta del error de compilación (para detectar si el agente repite el mismo fallo ciclo tras ciclo). */
 function errorSignature(errors: string): string {
@@ -340,7 +367,8 @@ function buildContinuation(
  */
 export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOptions, deps: BuilderDeps = {}): Promise<BuilderResult> {
   const toolLoop = deps.toolLoop ?? runToolLoop;
-  const tools = buildAgentTools(cfg, ws, opts.projectId);
+  const tracking: BuildTracking = { mockupsConsultadas: new Set() };
+  const tools = buildAgentTools(cfg, ws, opts.projectId, { tracking });
   const system = deps.systemPrompt ?? await loadPrompt("builder-system");
 
   let lastCompile = { ran: false, ok: false, errors: "" };
@@ -370,7 +398,7 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
       log.warn("builder", "el modelo de rol 'code' no soporta function-calling — el agente único no puede operar");
       return {
         status: "unsupported", compiledGreen: false, compileErrors: 0, compileOutput: "",
-        testsRan: false, testsFailed: 0, testsTotal: 0, cycles: cycle, uiPending: false,
+        testsRan: false, testsFailed: 0, testsTotal: 0, cycles: cycle, uiPending: false, mockupsUnread: [],
       };
     }
     await opts.progress?.onCycle?.(cycle, loop.toolsUsed);
@@ -415,10 +443,12 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
 
     if (compiledGreen && testsGreen && !uiPending && !testsPending) {
       log.info("builder", "verde", { cycle, tools: loop.toolsUsed.length });
+      const mockupsUnread = await computeMockupsUnread(opts, tracking, deps);
+      if (mockupsUnread.length) log.warn("builder", "pantallas construidas sin consultar su maqueta", { mockupsUnread });
       return {
         status: "green", compiledGreen: true, compileErrors: 0, compileOutput: compile.errors,
         testsRan: !!vitest?.ran, testsFailed: vitest?.failed ?? 0, testsTotal: vitest?.total ?? 0, cycles: cycle + 1,
-        uiPending: false,
+        uiPending: false, mockupsUnread,
       };
     }
 
@@ -451,5 +481,6 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
     testsTotal: lastVitest?.total ?? 0,
     cycles: cycle,
     uiPending: lastUiPending,
+    mockupsUnread: await computeMockupsUnread(opts, tracking, deps),
   };
 }

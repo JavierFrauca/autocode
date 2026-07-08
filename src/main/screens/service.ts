@@ -4,7 +4,7 @@ import matter from "gray-matter";
 import type { AppConfig, AppType } from "@shared";
 import { chat } from "../llm/client.js";
 import { saveProjectDocument, deleteProjectDocument } from "../papers/save.js";
-import { ensureMockupForScreen, isMockupStale, mockupPathFor, resolveProjectRoot, stripHtmlFences } from "../agents/mockup.js";
+import { ensureMockupForScreen, isMockupStale, mockupPathFor, resolveProjectRoot, specBodyHash, stripHtmlFences } from "../agents/mockup.js";
 import { getArchitecture } from "../architecture.js";
 import { ensureScreenFrontmatter, newScreenContent, readScreenMeta, screenSlug, writeScreenMeta, type ScreenKind } from "./meta.js";
 import { MAP_REL, buildMapFromScreens, flattenMap, parseMap, serializeMap, type MapNode } from "./map.js";
@@ -136,13 +136,46 @@ export async function regenerateMockup(cfg: AppConfig, projectId: string, relPat
   return { html };
 }
 
-/** Write-back del builder: fija el HTML de la maqueta (reflejo fiel de lo construido). */
-export async function setMockupHtml(projectId: string, relPath: string, html: string): Promise<void> {
+/**
+ * Entrada de historial para una actualización MANUAL de maqueta (`actualizar_maqueta`): archiva la
+ * versión anterior con su motivo y fecha, en vez de perderla en una sobrescritura silenciosa.
+ */
+export function formatMockupHistoryEntry(motivo: string, timestamp: string, previousHtml: string): string {
+  return `## ${timestamp}\n\n**Motivo:** ${motivo.trim()}\n\n\`\`\`html\n${previousHtml.trim()}\n\`\`\`\n\n`;
+}
+
+/** Ruta del historial de maqueta (`pantallas/x.md` → `pantallas/x.preview.historial.md`). */
+export function mockupHistoryPathFor(relPath: string): string {
+  return mockupPathFor(relPath).replace(/\.preview\.html$/i, ".preview.historial.md");
+}
+
+/**
+ * Write-back del builder: fija el HTML de la maqueta (reflejo fiel de lo construido). El `motivo` es
+ * OBLIGATORIO (lo exige ya el schema de la tool `actualizar_maqueta`): antes de sobrescribir, archiva la
+ * maqueta anterior + motivo + fecha en un historial legible, y reinserta la huella (`spec-hash`) del spec
+ * actual para que `isMockupStale` siga detectando cambios futuros del spec sobre esta misma maqueta.
+ */
+export async function setMockupHtml(projectId: string, relPath: string, html: string, motivo: string): Promise<void> {
   const rootPath = await resolveProjectRoot(projectId);
   const abs = path.resolve(rootPath, mockupPathFor(relPath));
   if (!abs.toLowerCase().startsWith(path.resolve(rootPath).toLowerCase())) throw new Error("ruta inválida");
+
+  const previous = await fs.readFile(abs, "utf-8").catch(() => null);
+  if (previous) {
+    const historyAbs = path.resolve(rootPath, mockupHistoryPathFor(relPath));
+    const entry = formatMockupHistoryEntry(motivo, new Date().toISOString(), previous);
+    await fs.appendFile(historyAbs, entry, "utf-8").catch(() => {});
+  }
+
+  let hashComment = "";
+  const specAbs = path.resolve(rootPath, relPath);
+  try {
+    const spec = await fs.readFile(specAbs, "utf-8");
+    hashComment = `\n<!-- spec-hash: ${specBodyHash(spec)} -->\n`;
+  } catch { /* sin spec legible: se queda sin huella, como cuando no existe */ }
+
   await fs.mkdir(path.dirname(abs), { recursive: true });
-  await fs.writeFile(abs, stripHtmlFences(html), "utf-8");
+  await fs.writeFile(abs, `${stripHtmlFences(html)}${hashComment}`, "utf-8");
 }
 
 /** Quita vallas ```markdown … ``` si el modelo las añade. */

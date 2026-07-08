@@ -130,12 +130,16 @@ Lo que SÍ planificas en apps web, en cuanto haya dominio:
 4. **Solo si el ADR lo pide**: proveedores externos (Google, Microsoft/Entra) y/o MFA — un sprint/tareas con
    `recibe: ["library/auth/login-system.md"]` (cada proveedor emite la MISMA cookie de sesión).
 
-Cada tarea de tipo "adapter" (ruta Fastify) DEBE llevar el campo "role" con el rol mínimo requerido:
+Cada tarea de tipo "adapter" (ruta Fastify) DEBE llevar el campo "role" con el rol mínimo requerido. Los roles
+NO están cerrados a una lista fija: `"admin"`, `"gestor"`, `"usuario"` son el PUNTO DE PARTIDA del andamiaje
+(array `ROLES` en `src/auth/guard.ts`), pero si el dominio tiene roles propios (léelos de los papers de
+decisiones/reglas: p.ej. "contable", "almacenero", "comercial"), USA esos nombres — la tarea de "Matriz de
+roles" (T-1-2) debe entonces sustituir el array `ROLES` de `guard.ts` por los roles reales del dominio
+(manteniendo "admin" como super-rol). Valores especiales, siempre disponibles:
 - "public"        → marca la ruta con `config: { publico: true }` (solo lo imprescindible)
 - "authenticated" → cualquier usuario logueado, sin restricción de rol
-- "usuario"       → rol usuario o superior
-- "gestor"        → rol gestor o admin
-- "admin"         → solo administradores
+- "admin"         → solo administradores (super-rol, siempre existe)
+Cualquier OTRO valor debe coincidir EXACTAMENTE con uno de los roles reales que hayas definido en `ROLES`.
 
 Ejemplo de tarea con rol:
 {
@@ -161,6 +165,18 @@ Cuando proceda, añade un sprint (o tareas dentro del de UI) "Panel de control" 
 - capa "ui", `recibe` = ["templates/web/dashboard.md", "library/ui/dashboards.md"], y los servicios de agregación que necesite (capa application — el dashboard recibe los agregados ya calculados, no calcula negocio).
 - Contenido: 3–5 KPIs, 1–2 gráficos (barras/donut, SVG sin librerías) y una tabla de "últimos N".
 
+BASE DE DATOS DE PRODUCCIÓN — SOLO SI EL ADR LO PIDE (apps server/api)
+
+Revisa el ADR-000: si lleva `**Motor:** postgres`, añade al sprint de infraestructura/despliegue una tarea `capa: "infrastructure"` que produzca la implementación Postgres de cada repo (`recibe: ["library/arquitectura/repository.md", "library/persistencia/postgres-drizzle.md"]`) y una tarea `capa: "infra"` para el paquete de despliegue (`recibe: ["templates/infra/docker-compose.md", "templates/infra/Dockerfile.md"]`). Si el ADR lleva `**Motor:** sqlite` o no dice nada, NO planifiques nada de Postgres/Docker — el andamiaje ya sirve para "Probar" con SQLite.
+
+MULTIEMPRESA — SOLO SI EL ADR LO PIDE (apps server)
+
+Si el ADR-000 lleva `**Multiempresa:** sí`, añade tareas `capa: "domain"`/`"infrastructure"` que apliquen `empresa_id` + scope por empresa en los repos y la sesión (`recibe: ["library/arquitectura/multi-tenant.md"]`), ANTES de las tareas de UI de cada entidad. Si lleva `**Multiempresa:** no` o no dice nada, no planifiques nada de esto.
+
+FACTURACIÓN Y STOCK — EVALÚA SI EL DOMINIO LO PIDE
+
+Si entre las entidades hay algo tipo Factura/IVA, añade una tarea de referencia (`capa: "application"`, `recibe: ["library/dominio/facturacion-espana.md"]`) antes de implementar el cálculo de totales. Si hay algo tipo Almacén/Stock/Movimientos, añade igual `recibe: ["library/dominio/movimientos-stock.md"]`. No lo metas si el dominio no lo menciona.
+
 REPORTING / IMPRESIÓN (LISTADOS Y FICHAS) — EVALÚA SI PROCEDE (solo apps con UI: server/electron)
 
 No por defecto. Si la app es de **gestión** y el usuario necesita **imprimir** (un papel/PDF de un **listado** —tabla de registros— o de una **ficha** —hoja de UN registro—), añade impresión. Mecanismo: `window.print()` (vale para web y escritorio; el diálogo del SO imprime o "Guarda como PDF"); sin dependencias. Criterio/guía en `library/ui/reporting.md`.
@@ -177,7 +193,7 @@ REGLAS:
 - Las tareas de capa "adapter" llevan además el campo "role" obligatorio
 - La verificación es un comando o comprobación objetiva que se puede ejecutar
 - El tipo puede ser "server" (web: Vue + Fastify + SQLite, con login + auditoría), "electron" (Electron + SQLite), "mcp" (servidor MCP) o "api" (servicio API/integración sin interfaz, API key + auditoría + tareas programadas)
-- Para tipo "server": el andamiaje (Fastify + SPA Vue + SQLite) lo coloca el programa; NO planifiques sprints de Docker/Postgres/despliegue (la BD local es SQLite y la entrega a producción se genera aparte como paquete de despliegue). Sí planifica las pantallas (web/src) y la API.
+- Para tipo "server": el andamiaje (Fastify + SPA Vue + SQLite) lo coloca el programa; NO planifiques sprints de Docker/Postgres/despliegue salvo que el ADR-000 lleve `**Motor:** postgres` (ver sección "BASE DE DATOS DE PRODUCCIÓN"), en cuyo caso añade esas tareas puntuales, no un sprint completo. Sí planifica las pantallas (web/src) y la API.
 - Para tipo "electron": incluye siempre el setup de Electron y empaquetado
 - Para tipo "mcp": NO planifiques UI, rutas web ni Docker. Sprint 1 = andamiaje MCP (lo coloca el programa); el resto son sprints que añaden TOOLS y RESOURCES en `src/server.ts` (cada uno con su esquema Zod y validaciones)
 - Para tipo "api": NO planifiques UI/SPA ni login de usuario (auth por API key, ya viene). Sprint 1 = andamiaje API (lo coloca el programa: API key + auditoría + jobs); el resto añade endpoints reales en `src/routes.ts`, tareas programadas en `src/jobs.ts` y auditoría. No Docker/Postgres (la entrega a producción es paquete de despliegue)

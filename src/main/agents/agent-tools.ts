@@ -35,8 +35,17 @@ export function countTscErrors(output: string): number {
   return (output.match(/error TS\d+/g) || []).length;
 }
 
+/**
+ * Rastreo (opcional) de qué pantallas se consultaron de verdad con `leer_maqueta` durante una
+ * construcción. No cambia el comportamiento del agente: solo lo hace observable, para poder avisar al
+ * final si se construyó una pantalla sin haber mirado nunca su maqueta.
+ */
+export interface BuildTracking {
+  mockupsConsultadas: Set<string>;
+}
+
 /** Tools de CONOCIMIENTO: papers del proyecto + biblioteca/plantillas doradas (vía RAG y por ruta). */
-function buildKnowledgeTools(cfg: AppConfig, projectId: string): ChatTool[] {
+function buildKnowledgeTools(cfg: AppConfig, projectId: string, tracking?: BuildTracking): ChatTool[] {
   return [
     {
       name: "buscar_documentacion",
@@ -143,6 +152,7 @@ function buildKnowledgeTools(cfg: AppConfig, projectId: string): ChatTool[] {
         if (rel.toLowerCase().endsWith(".preview.html")) rel = rel.replace(/\.preview\.html$/i, ".md");
         if (!rel.toLowerCase().endsWith(".md")) rel = `${rel}.md`;
         rel = `pantallas/${rel.replace(/^pantallas\//i, "")}`;
+        tracking?.mockupsConsultadas.add(rel);
         const previewRel = mockupPathFor(rel);
         try {
           const rootPath = await resolveProjectRoot(projectId);
@@ -241,14 +251,17 @@ function buildKnowledgeTools(cfg: AppConfig, projectId: string): ChatTool[] {
         "Actualiza la MAQUETA (.preview.html) de una pantalla con el HTML que refleja lo que has construido. " +
         "Llámalo SOLO si, por un requisito del código o de las reglas, has tenido que DESVIARTE de la maqueta " +
         "original (mover/añadir/quitar algo): así la plantilla queda como reflejo fiel de lo que sale. Pásale " +
-        "la pantalla y el HTML completo del boceto ya actualizado (mismo estilo/paleta que la maqueta original).",
+        "la pantalla, el HTML completo del boceto ya actualizado (mismo estilo/paleta que la maqueta original) " +
+        "y el MOTIVO concreto de la desviación (obligatorio: la maqueta anterior queda archivada con este " +
+        "motivo, no se pierde — no vale un motivo genérico como 'ajuste' o 'mejora').",
       parameters: {
         type: "object",
         properties: {
           pantalla: { type: "string", description: "Ruta o nombre, p.ej. pantallas/login.md o login" },
           html: { type: "string", description: "HTML completo del boceto actualizado" },
+          motivo: { type: "string", description: "Por qué te desviaste de la maqueta original (requisito de código/regla concreto)" },
         },
-        required: ["pantalla", "html"],
+        required: ["pantalla", "html", "motivo"],
       },
       run: async (a) => {
         const { setMockupHtml } = await import("../screens/service.js");
@@ -258,9 +271,11 @@ function buildKnowledgeTools(cfg: AppConfig, projectId: string): ChatTool[] {
         if (!rel.toLowerCase().endsWith(".md")) rel = `${rel}.md`;
         rel = `pantallas/${rel.replace(/^pantallas\//i, "")}`;
         if (!String(a.html ?? "").trim()) return "(no me has pasado el HTML del boceto)";
+        const motivo = String(a.motivo ?? "").trim();
+        if (motivo.length < 10) return "(indica un motivo concreto de la desviación, no genérico — mínimo 10 caracteres)";
         try {
-          await setMockupHtml(projectId, rel, String(a.html));
-          return `Maqueta de ${rel} actualizada — queda como reflejo fiel de lo construido.`;
+          await setMockupHtml(projectId, rel, String(a.html), motivo);
+          return `Maqueta de ${rel} actualizada — queda como reflejo fiel de lo construido (motivo archivado en su historial).`;
         } catch (e: any) {
           return `(no se pudo actualizar la maqueta: ${e?.message ?? e})`;
         }
@@ -380,10 +395,10 @@ export function buildAgentTools(
   cfg: AppConfig,
   ws: string,
   projectId: string,
-  opts: { allowDelegation?: boolean } = {},
+  opts: { allowDelegation?: boolean; tracking?: BuildTracking } = {},
 ): ChatTool[] {
   const tools = [
-    ...buildKnowledgeTools(cfg, projectId),
+    ...buildKnowledgeTools(cfg, projectId, opts.tracking),
     ...buildCodeTools(ws),
     ...buildBuildTools(ws),
   ];

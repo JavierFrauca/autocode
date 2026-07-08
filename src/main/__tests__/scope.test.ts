@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
-  computeScope, dedupeEntidades, formatScopeForChat, hasAuthSectionContent, looksLikeRolesDoc,
-  normalizeEntitySlug, type ScopeInventory,
+  computeScope, dedupeEntidades, formatScopeForChat, hasAuthSectionContent, hasDbEngineSectionContent,
+  hasMultiTenantSectionContent, looksLikeRolesDoc, normalizeEntitySlug, type ScopeInventory,
 } from "../agents/scope.js";
 
 /** Inventario base (vacío) que cada test va completando. */
@@ -11,6 +11,8 @@ function emptyInv(appType: ScopeInventory["appType"]): ScopeInventory {
     architectureConfirmed: !!appType,
     hasAuthSection: false,
     hasRolesDoc: false,
+    hasDbEngineDecision: false,
+    hasMultiTenantDecision: false,
     entidades: [],
     screenCount: 0,
     reglasCount: 0,
@@ -35,22 +37,35 @@ describe("computeScope (motor de completitud del alcance)", () => {
     expect(r.items.find((i) => i.status !== "ok")?.key).toBe("modelo-datos");
   });
 
-  test("web: incluye acceso, roles y pantallas como piezas requeridas", () => {
+  test("web: incluye acceso, roles, multiempresa, motor de datos y pantallas como piezas requeridas", () => {
     const r = computeScope(emptyInv("server"));
     expect(r.items.some((i) => i.key === "auth")).toBe(true);
     expect(r.items.some((i) => i.key === "roles")).toBe(true);
+    expect(r.items.some((i) => i.key === "multiempresa")).toBe(true);
+    expect(r.items.some((i) => i.key === "motor-datos")).toBe(true);
     expect(r.items.some((i) => i.key === "pantallas")).toBe(true);
   });
 
-  test("api/mcp: sin pantallas, auth de usuario ni roles; sí datos y reglas", () => {
-    for (const t of ["api", "mcp"] as const) {
-      const r = computeScope(emptyInv(t));
-      expect(r.items.some((i) => i.key === "pantallas")).toBe(false);
-      expect(r.items.some((i) => i.key === "auth")).toBe(false);
-      expect(r.items.some((i) => i.key === "roles")).toBe(false);
-      expect(r.items.some((i) => i.key === "modelo-datos")).toBe(true);
-      expect(r.items.some((i) => i.key === "reglas")).toBe(true);
-    }
+  test("api: sin pantallas, auth de usuario, roles ni multiempresa; sí datos, motor de BBDD y reglas", () => {
+    const r = computeScope(emptyInv("api"));
+    expect(r.items.some((i) => i.key === "pantallas")).toBe(false);
+    expect(r.items.some((i) => i.key === "auth")).toBe(false);
+    expect(r.items.some((i) => i.key === "roles")).toBe(false);
+    expect(r.items.some((i) => i.key === "multiempresa")).toBe(false);
+    expect(r.items.some((i) => i.key === "motor-datos")).toBe(true);
+    expect(r.items.some((i) => i.key === "modelo-datos")).toBe(true);
+    expect(r.items.some((i) => i.key === "reglas")).toBe(true);
+  });
+
+  test("mcp: sin pantallas, auth, roles, multiempresa ni motor de datos; sí datos y reglas", () => {
+    const r = computeScope(emptyInv("mcp"));
+    expect(r.items.some((i) => i.key === "pantallas")).toBe(false);
+    expect(r.items.some((i) => i.key === "auth")).toBe(false);
+    expect(r.items.some((i) => i.key === "roles")).toBe(false);
+    expect(r.items.some((i) => i.key === "multiempresa")).toBe(false);
+    expect(r.items.some((i) => i.key === "motor-datos")).toBe(false);
+    expect(r.items.some((i) => i.key === "modelo-datos")).toBe(true);
+    expect(r.items.some((i) => i.key === "reglas")).toBe(true);
   });
 
   test("la estructura de pantallas (mapa) cuenta como cubierta si hay screens", () => {
@@ -72,6 +87,8 @@ describe("computeScope (motor de completitud del alcance)", () => {
       architectureConfirmed: true,
       hasAuthSection: true,
       hasRolesDoc: true,
+      hasDbEngineDecision: true,
+      hasMultiTenantDecision: true,
       entidades: ["cliente"],
       screenCount: 4,
       reglasCount: 2,
@@ -144,5 +161,33 @@ describe("hasAuthSectionContent (exige contenido real, no solo el encabezado)", 
 
   test("sin sección de Autenticación → false", () => {
     expect(hasAuthSectionContent("## Decisiones técnicas\n**Tipo:** web")).toBe(false);
+  });
+});
+
+describe("hasDbEngineSectionContent (exige contenido real, no solo el encabezado)", () => {
+  test("encabezado con la línea canónica de motor → true", () => {
+    expect(hasDbEngineSectionContent("## Base de datos\n**Motor:** postgres\n**Motivo:** alta concurrencia")).toBe(true);
+  });
+
+  test("encabezado VACÍO (sin línea de motor) → false", () => {
+    expect(hasDbEngineSectionContent("## Base de datos\n")).toBe(false);
+  });
+
+  test("sin sección de Base de datos → false", () => {
+    expect(hasDbEngineSectionContent("## Decisiones técnicas\n**Tipo:** web")).toBe(false);
+  });
+});
+
+describe("hasMultiTenantSectionContent (basta la línea canónica, sin encabezado fijo)", () => {
+  test("línea 'Multiempresa: sí' dentro de Decisiones técnicas → true", () => {
+    expect(hasMultiTenantSectionContent("## Decisiones técnicas\n**Tipo:** web\n**Multiempresa:** sí")).toBe(true);
+  });
+
+  test("línea 'Multiempresa: no' también cuenta como decisión tomada → true", () => {
+    expect(hasMultiTenantSectionContent("## Multiempresa\n**Multiempresa:** no")).toBe(true);
+  });
+
+  test("sin la línea canónica → false", () => {
+    expect(hasMultiTenantSectionContent("## Decisiones técnicas\n**Tipo:** web")).toBe(false);
   });
 });

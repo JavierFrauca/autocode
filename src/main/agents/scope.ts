@@ -28,6 +28,10 @@ export interface ScopeInventory {
   hasAuthSection: boolean;
   /** Existe un ADR de roles/permisos (solo aplica a web). */
   hasRolesDoc: boolean;
+  /** El ADR de arquitectura tiene sección de motor de base de datos (solo aplica a web/api). */
+  hasDbEngineDecision: boolean;
+  /** El ADR de arquitectura tiene la decisión de multiempresa (solo aplica a web). */
+  hasMultiTenantDecision: boolean;
   /** Slugs de las entidades del modelo de datos (`dominios/<slug>.md`). */
   entidades: string[];
   /** Nº de pantallas en el mapa de estructura (`pantallas/_mapa.md`). */
@@ -127,6 +131,35 @@ export function computeScope(inv: ScopeInventory): ScopeReport {
             detail: "sin definir",
             question:
               "¿Habrá distintos tipos de usuario (por ejemplo administradores y usuarios normales)? ¿Qué puede hacer cada uno; alguien puede borrar cosas y otros no?",
+          },
+    );
+    // 4a) Multiempresa — solo web (aislamiento de datos entre organizaciones distintas en la misma app).
+    items.push(
+      inv.hasMultiTenantDecision
+        ? { key: "multiempresa", label: "Una empresa o varias", status: "ok", detail: "definido en el ADR de arquitectura" }
+        : {
+            key: "multiempresa",
+            label: "Una empresa o varias",
+            status: "missing",
+            detail: "sin definir",
+            question:
+              "¿La va a usar UNA sola empresa/organización, o VARIAS que no deben ver los datos unas de otras (multiempresa)?",
+          },
+    );
+  }
+
+  // 4b) Motor de base de datos — solo web/api (server local es SQLite; esto decide qué se prepara para producción).
+  if (web || t === "api") {
+    items.push(
+      inv.hasDbEngineDecision
+        ? { key: "motor-datos", label: "Base de datos para producción", status: "ok", detail: "definido en el ADR de arquitectura" }
+        : {
+            key: "motor-datos",
+            label: "Base de datos para producción",
+            status: "missing",
+            detail: "sin definir",
+            question:
+              "¿Cuánta gente la va a usar a la vez, y esperas mucho volumen de datos? Si es poca gente o uso ligero, con lo de serie (SQLite) sobra; si esperas bastante gente conectada a la vez o mucho volumen, conviene preparar PostgreSQL de cara a cuando se ponga en producción.",
           },
     );
   }
@@ -237,6 +270,24 @@ export function hasAuthSectionContent(archBody: string): boolean {
   return /##\s*Autenticaci[oó]n/i.test(archBody) && /\*\*Proveedores:\*\*/i.test(archBody);
 }
 
+/**
+ * ¿El ADR de arquitectura tiene sección de motor de base de datos CON CONTENIDO real? Igual que
+ * `hasAuthSectionContent`: no basta el encabezado, exige la línea canónica `**Motor:**` (sqlite o postgres).
+ */
+export function hasDbEngineSectionContent(archBody: string): boolean {
+  return /##\s*Base de datos/i.test(archBody) && /\*\*Motor:\*\*/i.test(archBody);
+}
+
+/**
+ * ¿El ADR de arquitectura ya registra la decisión de multiempresa? A diferencia de auth/motor de datos, esta
+ * línea puede vivir dentro de "## Decisiones técnicas" o en su propia sección "## Multiempresa" (ver
+ * `documenter-system.md`), así que basta con la línea canónica `**Multiempresa:**`, sin exigir un encabezado
+ * concreto.
+ */
+export function hasMultiTenantSectionContent(archBody: string): boolean {
+  return /\*\*Multiempresa:\*\*\s*(s[ií]|no)/i.test(archBody);
+}
+
 async function projectRoot(projectId: string): Promise<string | null> {
   const rows = await db()
     .select({ rootPath: schema.projects.rootPath })
@@ -274,6 +325,8 @@ export async function gatherInventory(projectId: string): Promise<ScopeInventory
     architectureConfirmed: !!arch && !arch.isDefault,
     hasAuthSection: !!arch && hasAuthSectionContent(arch.body),
     hasRolesDoc,
+    hasDbEngineDecision: !!arch && hasDbEngineSectionContent(arch.body),
+    hasMultiTenantDecision: !!arch && hasMultiTenantSectionContent(arch.body),
     entidades,
     screenCount,
     reglasCount: reglas.length,

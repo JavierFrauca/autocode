@@ -276,6 +276,12 @@ export const runExecutor = {
       const passed = result.status === "green";
       if (passed) {
         await rec.done(sVal, `Compila sin errores${result.testsRan ? ` · ${result.testsTotal - result.testsFailed}/${result.testsTotal} pruebas pasan` : ""} ✓`);
+        if (result.mockupsUnread.length) {
+          await rec.fail(
+            await rec.add("Validación", "Aviso: pantallas construidas sin consultar su maqueta"),
+            `${result.mockupsUnread.length} pantalla(s) se construyeron sin llamar nunca a leer_maqueta en este ciclo (no bloquea la versión guardada): ${result.mockupsUnread.join(", ")}.`,
+          );
+        }
         // Verificación de arranque (best-effort): el build REAL de la app emite/empaqueta (más fuerte
         // que --noEmit) y, en escritorio, produce el renderer para la verificación visual. No invalida
         // el verde si se omite o no concluye; solo informa.
@@ -296,17 +302,24 @@ export const runExecutor = {
         // Las PRUEBAS de aceptación ya NO se crean aquí: se escriben tras el "OK" del usuario (validación),
         // o antes si él lo pide voluntariamente. Ver la fase `writeTests` (runTestsAndReview) más abajo.
 
-        // Verificación VISUAL (escritorio): lanza el renderer construido en una ventana oculta y captura
-        // un screenshot para confirmar que se VE algo (no pantalla en blanco). Best-effort, no bloquea.
-        if (appType === "electron") {
+        // Verificación VISUAL: lanza el renderer/servidor construido en una ventana oculta y captura un
+        // screenshot para confirmar que se VE algo (no pantalla en blanco). En apps `server`, además
+        // navega pantalla a pantalla (autenticado) y compara campos/botones/tablas contra su maqueta.
+        // Best-effort, no bloquea.
+        if (appType === "electron" || appType === "server") {
           const sVis = await rec.add("Validación", "Verificación visual (captura del renderizado)");
           try {
-            const vis = await verifyVisual(ws, appType);
+            const vis = await verifyVisual(ws, appType, projectId);
             if (vis.skipped) await rec.done(sVis, `Verificación visual omitida — ${vis.skipped}`);
-            else if (vis.ok) await rec.done(sVis, `La interfaz renderiza correctamente ✓${vis.screenshot ? `\n${vis.screenshot}` : ""}`);
-            else {
-              log.warn("executor", "la interfaz no renderiza bien", { findings: vis.findings });
-              await rec.fail(sVis, `La interfaz podría no verse del todo bien (no bloquea la versión guardada).${vis.screenshot ? `\n${vis.screenshot}` : ""}`);
+            else if (vis.ok) {
+              await rec.done(sVis, `La interfaz renderiza correctamente ✓${vis.screenshot ? `\n${vis.screenshot}` : ""}`);
+            } else {
+              log.warn("executor", "la interfaz no renderiza bien", { findings: vis.findings, screens: vis.screens });
+              const desvios = (vis.screens ?? []).filter((s) => s.status === "checked" && !s.ok);
+              const detalle = desvios.length
+                ? `\nPantallas que podrían haberse desviado de su maqueta: ${desvios.map((s) => `${s.slug} (${s.detail})`).join("; ")}`
+                : "";
+              await rec.fail(sVis, `La interfaz podría no verse del todo bien (no bloquea la versión guardada).${detalle}${vis.screenshot ? `\n${vis.screenshot}` : ""}`);
             }
           } catch (e: any) {
             await rec.done(sVis, friendly("Verificación visual no concluyente — no afecta a la versión ya guardada.", e));

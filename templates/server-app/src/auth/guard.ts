@@ -8,8 +8,16 @@ import { verificarSesion, type Sesion } from "./tokens.js";
  *  - Todo /api/* exige sesión, SALVO las rutas marcadas con `config: { publico: true }` (login, health).
  *  - `config: { roles: [...] }` restringe por rol.
  * La frontera de seguridad real es esta, en el servidor; el guard del router del front es solo UX.
+ *
+ * ROLES: "admin"/"gestor"/"usuario" son un PUNTO DE PARTIDA de ejemplo, no una lista cerrada. Cuando el
+ * dominio tenga roles propios (p.ej. "contable", "almacenero", "comercial"), sustituye el array `ROLES`
+ * por los roles reales — es el ÚNICO sitio que hace falta tocar: `Rol` y las comprobaciones de este
+ * fichero se derivan de él, y `admin-routes.ts` importa el mismo array para su validación Zod, así los
+ * roles nunca quedan desincronizados entre el guard y la gestión de usuarios. Mantén siempre "admin"
+ * como super-rol con acceso total.
  */
-export type Rol = "admin" | "gestor" | "usuario";
+export const ROLES = ["admin", "gestor", "usuario"] as const;
+export type Rol = (typeof ROLES)[number];
 export const COOKIE_SESION = "sesion";
 
 declare module "fastify" {

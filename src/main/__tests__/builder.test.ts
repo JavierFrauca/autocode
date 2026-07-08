@@ -138,4 +138,34 @@ describe("runBuilder (motor del agente único, offline)", () => {
     expect(gates.length).toBe(1);
     expect(gates[0].compiledGreen).toBe(true);
   }, 30_000);
+
+  it("mockupsUnread avisa de pantallas construidas sin consultar leer_maqueta", async () => {
+    const toolLoop: BuilderDeps["toolLoop"] = async (_cfg, _role, _messages, tools: ChatTool[]) => {
+      const write = tools.find((t) => t.name === "escribir_fichero")!;
+      const leerMaqueta = tools.find((t) => t.name === "leer_maqueta")!;
+      await write.run({ ruta: "tsconfig.json", contenido: TSCONFIG });
+      await write.run({ ruta: "src/index.ts", contenido: GOOD });
+      await leerMaqueta.run({ pantalla: "cliente-lista" }); // solo se consulta esta pantalla
+      return { messages: [], toolsUsed: ["escribir_fichero", "escribir_fichero", "leer_maqueta"], supported: true };
+    };
+    const res = await runBuilder(cfg, ws, baseOpts, {
+      toolLoop, systemPrompt: "test",
+      resolveRootPath: async () => "/fake/root",
+      listProjectScreens: async () => [
+        { slug: "cliente-lista", rel: "pantallas/cliente-lista.md", kind: "pagina", parent: null, hasMockup: true },
+        { slug: "factura-lista", rel: "pantallas/factura-lista.md", kind: "pagina", parent: null, hasMockup: true },
+      ],
+    });
+    expect(res.status).toBe("green");
+    expect(res.mockupsUnread).toEqual(["factura-lista"]);
+  }, 30_000);
+
+  it("mockupsUnread vacío si no hay projectId resoluble (best-effort, no bloquea)", async () => {
+    const toolLoop = scriptedDriver([
+      [{ ruta: "tsconfig.json", contenido: TSCONFIG }, { ruta: "src/index.ts", contenido: GOOD }],
+    ]);
+    const res = await runBuilder(cfg, ws, baseOpts, { toolLoop, systemPrompt: "test" });
+    expect(res.status).toBe("green");
+    expect(res.mockupsUnread).toEqual([]);
+  }, 30_000);
 });

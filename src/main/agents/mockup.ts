@@ -6,6 +6,7 @@ import type { AppConfig, AppType } from "@shared";
 import { chat, type ChatMessage, type ChatResult } from "../llm/client.js";
 import { loadPrompt } from "../prompts.js";
 import { log } from "../log.js";
+import { readScreenMeta, screenSlug, type ScreenKind } from "../screens/meta.js";
 
 /** Huella del CUERPO del spec (sin frontmatter). La maqueta sale del cuerpo; cambiar tipo/padre/orden
  *  NO debe marcarla como desactualizada. La maqueta lleva embebida la huella con la que se generó. */
@@ -292,4 +293,40 @@ export async function ensureMockupsForScreens(
     }
   }
   return { total: names.length, generated };
+}
+
+export interface ProjectScreenInfo {
+  /** Slug estable (`pantallas/cliente-lista.md` → `cliente-lista`). */
+  slug: string;
+  /** Ruta relativa del spec dentro del proyecto (`pantallas/<slug>.md`). */
+  rel: string;
+  kind: ScreenKind;
+  parent: string | null;
+  hasMockup: boolean;
+}
+
+/**
+ * Lista TODAS las pantallas reales del proyecto (`pantallas/*.md`, excluyendo `_*`) con su slug,
+ * jerarquía y si ya tienen maqueta. Punto único de listado reutilizado por la verificación visual
+ * (`verify-visual.ts`) y por el rastreo de consultas a `leer_maqueta` (`builder.ts`) — evita que cada
+ * consumidor reimplemente su propio `fs.readdir` de `pantallas/`.
+ */
+export async function listProjectScreens(rootPath: string): Promise<ProjectScreenInfo[]> {
+  const dir = path.join(rootPath, SCREEN_DIR);
+  let names: string[] = [];
+  try {
+    names = (await fs.readdir(dir)).filter((n) => isScreenDoc(`${SCREEN_DIR}/${n}`));
+  } catch {
+    return [];
+  }
+  const out: ProjectScreenInfo[] = [];
+  for (const name of names.sort()) {
+    const rel = `${SCREEN_DIR}/${name}`;
+    let spec = "";
+    try { spec = await fs.readFile(path.join(dir, name), "utf-8"); } catch { continue; }
+    const meta = readScreenMeta(spec);
+    const hasMockup = await fs.access(path.resolve(rootPath, mockupPathFor(rel))).then(() => true).catch(() => false);
+    out.push({ slug: screenSlug(rel), rel, kind: meta.kind, parent: meta.parent, hasMockup });
+  }
+  return out;
 }
