@@ -12,6 +12,7 @@ import { registerAgentRoutes } from "./routes/agents";
 import { registerFilesRoutes } from "./routes/files";
 import { registerPlanRoutes } from "./routes/plan";
 import { registerMcpRoutes } from "./routes/mcp";
+import { registerMcpCatalogRoutes } from "./routes/mcp-catalog";
 import { registerVersionRoutes } from "./routes/versions";
 import { registerExecutionRoutes } from "./routes/execution";
 import { registerPreviewRoutes } from "./routes/preview";
@@ -43,6 +44,7 @@ export async function startServer(): Promise<void> {
   await registerFilesRoutes(app);
   await registerPlanRoutes(app);
   await registerMcpRoutes(app);
+  await registerMcpCatalogRoutes(app);
   await registerVersionRoutes(app);
   await registerExecutionRoutes(app);
   await registerPreviewRoutes(app);

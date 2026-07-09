@@ -19,6 +19,13 @@ npm run start:http     # arranca el servidor HTTP (PORT=3000 por defecto)
 npm run dev            # stdio en desarrollo (tsx)
 ```
 
+### Autenticación del transporte HTTP
+
+Define `MCP_HTTP_TOKEN` antes de exponer `start:http` fuera de tu propia máquina: toda petición a
+`/mcp` deberá traer `Authorization: Bearer <token>` (o `X-API-Key: <token>`), si no responde 401. Sin
+esa variable el servidor sigue arrancando (para no romper el uso local), pero avisa por consola de que
+no hay autenticación.
+
 ## Registrar en Claude Desktop (stdio)
 
 En `claude_desktop_config.json`:
@@ -46,3 +53,9 @@ server.registerTool(
 - Cada tool devuelve `{ content: [{ type: "text", text }] }` (usa `asText`); errores con `isError: true`.
 - Valida la entrada con Zod (`inputSchema`).
 - **stdio**: NUNCA escribas a `stdout` (rompe el protocolo) — los logs van a `stderr` (`console.error`).
+
+## Persistencia (opcional)
+
+Si tus tools necesitan recordar algo entre llamadas, hay un patrón listo con SQLite embebido en `src/db.ts`
++ `src/repos/` (mismo patrón *repository* que el resto de andamiajes de AutoCode): llama a `initDb()` una
+vez en `server.ts` y accede a los datos siempre a través de un repositorio, nunca con SQL suelto.

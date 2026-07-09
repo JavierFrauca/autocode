@@ -12,6 +12,8 @@ import { buildChatTools } from "../chat/tools.js";
 import { buildGovernanceChatTools } from "../tools/governance-tools.js";
 import { documentSession } from "../agents/documenter.js";
 import { formatScopeForChat, getProjectScope } from "../agents/scope.js";
+import { getActiveMcpTools } from "../mcp/client.js";
+import { parseSearchResults, type SearchResultItem } from "../mcp/search-results.js";
 import { log } from "../log.js";
 
 /** ¿El mensaje del usuario es una confirmación afirmativa? (para "dar por válida" la app). */
@@ -97,6 +99,10 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     // mostrar su boceto en línea ("ver las pantallas mientras se trabajan"). Fuera del try porque se
     // persiste/emite después de cerrarlo.
     const touchedScreens: string[] = [];
+    // Resultados de búsqueda web de ESTE turno (si el chat usó el MCP de búsqueda): se devuelven
+    // estructurados para pintar una tarjeta por resultado con un botón "Adjuntar", en vez de dejar que
+    // el usuario tenga que pedirle la URL al modelo o copiarla a mano.
+    const searchResults: SearchResultItem[] = [];
     try {
       // 0) Idempotencia: si ya existe un mensaje con este id, es un reenvío de la misma petición.
       //    Cortamos sin insertar nada ni volver a llamar al modelo (esto evitaba la triplicación).
@@ -142,14 +148,40 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       const ragContext = await buildProjectContext(cfg, projectId, content);
       if (ragContext) baseMessages.push({ role: "system", content: ragContext });
       // Motor de completitud: el chat conoce QUÉ piezas del alcance faltan y dirige la entrevista al
-      // hueco más importante (best-effort: nunca rompe el turno si falla el cálculo).
+      // hueco más importante (best-effort: nunca rompe el turno si falla el cálculo). Guardamos si YA
+      // estaba cerrado ANTES de este turno: es la condición para la red de seguridad de más abajo (si no
+      // se pudo calcular, se trata como "abierto" — más vale una llamada de más al documenter que perder
+      // en silencio lo que el usuario acaba de contar).
+      let scopeWasOpenBeforeTurn = true;
       try {
         const scope = await getProjectScope(projectId);
+        scopeWasOpenBeforeTurn = !scope.closed;
         baseMessages.push({ role: "system", content: formatScopeForChat(scope) });
       } catch (e) {
         log.warn("chat", "no se pudo calcular la cobertura del alcance", { err: e });
       }
       baseMessages.push(...history.map((h) => ({ role: h.role as ChatMessage["role"], content: h.content })));
+
+      // MCPs de la biblioteca cerrada que el usuario tenga activos (búsqueda web, y lo que se añada más
+      // adelante): "vitaminan" el chat sin tocar este fichero — best-effort, nunca rompe el turno si un
+      // MCP falla al conectar (getActiveMcpTools ya degrada con gracia, pero por si acaso).
+      const mcpTools = await getActiveMcpTools(cfg).catch((e) => {
+        log.warn("chat", "no se pudieron cargar las tools de los MCP activos", { err: e });
+        return [];
+      });
+      // Cualquier tool MCP literalmente llamada "search" (por convención del propio MCP) se envuelve para
+      // capturar sus resultados estructurados además de devolvérselos al modelo tal cual — best-effort:
+      // si el formato no es el esperado, `parseSearchResults` devuelve [] y no pasa nada (el modelo sigue
+      // teniendo el texto crudo para leerlo en prosa).
+      for (const t of mcpTools) {
+        if (!t.name.endsWith("__search")) continue;
+        const originalRun = t.run;
+        t.run = async (args: any): Promise<string> => {
+          const raw = await originalRun(args);
+          searchResults.push(...parseSearchResults(raw));
+          return raw;
+        };
+      }
 
       // El chat (1) CONSULTA la biblioteca y los papers para responder con criterio (p.ej. "¿qué
       // autenticación puedes usar?" → busca y contesta con lo que SÍ hay) y (2) GOBIERNA los ficheros del
@@ -160,6 +192,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
       const chatTools = [
         ...buildChatTools(cfg, projectId, { readOnly: true }),
         ...buildGovernanceChatTools(cfg, projectId),
+        ...mcpTools,
         // El documenter integrado como TOOL: extracción estructurada de decisiones/reglas/pantallas de la
         // conversación + persistencia (numera ADR/RN sin duplicar, auto-maqueta pantallas). El chat la
         // llama cuando se cierra algo que documentar (ya no corre como agente de fondo tras cada mensaje).
@@ -182,15 +215,26 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
               }
               return JSON.stringify({ ok: true, guardados: r.saved, borrados: r.deleted });
             } catch (e: any) {
-              return `Error documentando: ${e?.message ?? e}`;
+              // El resultado de la tool lo lee el MODELO (puede acabar citándolo tal cual al usuario, que
+              // no sabe programar): nunca le pasamos el mensaje técnico crudo, solo lo registramos en logs.
+              log.warn("chat", "el documenter falló al guardar lo hablado en este turno", { err: e, projectId, sessionId });
+              return JSON.stringify({
+                ok: false,
+                aviso: "No he podido guardar esto como documento del proyecto por un problema técnico puntual. Dile al usuario que no pasa nada y que lo intentarás de nuevo en el próximo mensaje; no es necesario que repita lo dicho.",
+              });
             }
           },
         },
       ];
       let llmMessages: ChatMessage[] = baseMessages;
+      // Tools de ESCRITURA usadas este turno (documentar + gobernanza *_guardar/*_borrar): si el bucle
+      // falla entero, la dejamos vacía a propósito — no sabemos qué pasó, así que la red de seguridad de
+      // abajo actúa como si no se hubiera guardado nada (más seguro que asumir que sí).
+      let toolsUsedThisTurn: string[] = [];
       try {
         const loop = await runToolLoop(cfg, "chat", baseMessages, chatTools, "chat-tools");
         if (loop.supported) llmMessages = loop.messages as ChatMessage[];
+        toolsUsedThisTurn = loop.toolsUsed;
       } catch (e) {
         log.warn("chat", "el bucle de tools del chat falló; respondo sin tools", { err: e });
       }
@@ -244,6 +288,28 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
           send("delta", { text: full });
         }
       }
+
+      // Red de seguridad del documenter: si había un hueco del alcance ABIERTO antes de este turno y el
+      // modelo no usó NINGUNA tool de escritura (ni documentar ni gobernanza *_guardar/*_borrar), lo que
+      // el usuario acaba de contar se perdería en silencio — nada más lo detectaría. Documentamos de
+      // todas formas: documentSession decide por sí sola si de verdad había algo que guardar (si el turno
+      // era solo un saludo, no hace nada), así no depende de que el MISMO modelo acierte dos veces. No se
+      // dispara si YA se usó alguna tool de escritura (evita duplicar con lo que ya se guardó) ni una vez
+      // el alcance está cerrado (evita una llamada extra en cada mensaje para siempre).
+      const usoAlgunaToolDeEscritura = toolsUsedThisTurn.some((t) => t === "documentar" || /_guardar$|_borrar$/.test(t));
+      if (scopeWasOpenBeforeTurn && !usoAlgunaToolDeEscritura) {
+        try {
+          const r = await documentSession(cfg, projectId, sessionId);
+          for (const s of r.saved) {
+            const base = s.replace(/\\/g, "/").split("/").pop() ?? "";
+            if (s.startsWith("pantallas/") && s.toLowerCase().endsWith(".md") && !base.startsWith("_") && !touchedScreens.includes(s)) {
+              touchedScreens.push(s);
+            }
+          }
+        } catch (e) {
+          log.warn("chat", "la red de seguridad del documenter también falló", { err: e, projectId, sessionId });
+        }
+      }
     } catch (e: any) {
       log.error("chat", "fallo durante la respuesta del chat", { err: e, projectId, sessionId });
       clearInterval(heartbeat);
@@ -254,15 +320,21 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     // 5) Persistir SIEMPRE la respuesta (aunque el cliente se haya desconectado): así no se
     //    pierde nunca y aparece al recargar la conversación. Solo si hubo contenido real.
     const asstMsgId = `msg_${ulid().toLowerCase()}`;
-    // El documenter YA NO corre como agente de fondo tras cada mensaje: ahora es una TOOL (`documentar`)
-    // que el chat invoca durante el turno cuando se cierra algo que documentar (ver chatTools arriba). Así
-    // hay un único flujo y no se duplica con las tools de gobernanza por categoría.
+    // El documenter YA NO corre como agente de fondo tras CADA mensaje: es una TOOL (`documentar`) que el
+    // chat invoca durante el turno cuando se cierra algo que documentar (ver chatTools arriba) — así no se
+    // duplica con las tools de gobernanza por categoría. La única excepción es la red de seguridad de
+    // arriba: mientras el alcance siga abierto, si el turno no usó NINGUNA tool de escritura, se llama de
+    // todas formas para no perder en silencio lo que el usuario acaba de contar.
     const runId: string | null = null;
     if (full.trim()) {
       try {
         await db().insert(schema.messages).values({
           id: asstMsgId, projectId, sessionId, role: "assistant", content: full,
-          metadata: { model, tokensIn, tokensOut, ...(touchedScreens.length ? { screens: touchedScreens } : {}) },
+          metadata: {
+            model, tokensIn, tokensOut,
+            ...(touchedScreens.length ? { screens: touchedScreens } : {}),
+            ...(searchResults.length ? { searchResults } : {}),
+          },
         });
       } catch (e) {
         log.warn("chat", "no se pudo guardar la respuesta del asistente", { err: e });
@@ -324,7 +396,7 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
 
     if (closed) return; // el socket ya está cerrado; la respuesta quedó guardada arriba
 
-    send("assistant", { id: asstMsgId, content: full, model, tokensIn, tokensOut, documenterRunId: runId, screens: touchedScreens });
+    send("assistant", { id: asstMsgId, content: full, model, tokensIn, tokensOut, documenterRunId: runId, screens: touchedScreens, searchResults });
     if (noticeId && noticeText) send("notice", { id: noticeId, content: noticeText });
     send("done", { ok: true, notice: !!noticeId });
     try { reply.raw.end(); } catch {}

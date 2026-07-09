@@ -1,10 +1,13 @@
-import { getDb } from "../db.js";
+import { BaseRepoSqlite } from "./base.repo.js";
 
 /**
- * EJEMPLO del patrón Repository: el acceso a datos va SIEMPRE detrás de una interfaz (puerto). La lógica
- * de la app depende de `ItemsRepo`, NO de SQLite → cambiar de motor (Postgres…) = otra implementación,
- * sin tocar rutas/servicios. El agente COPIA este patrón por cada entidad del dominio (un fichero
- * `<entidad>.repo.ts` con su interfaz + impl, registrado en `repos/index.ts`).
+ * EJEMPLO del patrón Repository: el acceso a datos va SIEMPRE detrás de una interfaz (puerto), y el
+ * CRUD genérico (listar/buscarPorId/borrar) se hereda de `BaseRepoSqlite` — NO se reescribe a mano por
+ * entidad. La lógica de la app depende de `ItemsRepo`, NO de SQLite → cambiar de motor (Postgres…) es
+ * otra implementación de la MISMA base, sin tocar rutas/servicios. El agente COPIA este patrón por cada
+ * entidad del dominio (un fichero `<entidad>.repo.ts`: interfaz + clase que EXTIENDE `BaseRepoSqlite`,
+ * registrado en `repos/index.ts`). La primera entidad fija el patrón; las siguientes lo reutilizan tal
+ * cual, no inventan una forma distinta.
  */
 export interface Item {
   id: number;
@@ -19,17 +22,14 @@ export interface ItemsRepo {
   borrar(id: number): void;
 }
 
-/** Implementación SQLite. Para Postgres se crearía `ItemsRepoPostgres implements ItemsRepo`. */
-export class ItemsRepoSqlite implements ItemsRepo {
-  listar(): Item[] {
-    return getDb().prepare("SELECT id, nombre, creado FROM items ORDER BY id DESC").all() as Item[];
-  }
+/** Implementación SQLite. Para Postgres se crearía `ItemsRepoPostgres extends BaseRepoSqlite<Item>` con su propio driver. */
+export class ItemsRepoSqlite extends BaseRepoSqlite<Item> implements ItemsRepo {
+  protected readonly tabla = "items";
+  protected readonly idColumna = "id";
+
   crear(nombre: string): Item {
     const creado = new Date().toISOString();
-    const info = getDb().prepare("INSERT INTO items (nombre, creado) VALUES (?, ?)").run(nombre, creado);
+    const info = this.db().prepare("INSERT INTO items (nombre, creado) VALUES (?, ?)").run(nombre, creado);
     return { id: Number(info.lastInsertRowid), nombre, creado };
-  }
-  borrar(id: number): void {
-    getDb().prepare("DELETE FROM items WHERE id = ?").run(id);
   }
 }

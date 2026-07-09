@@ -22,6 +22,11 @@ const kb = () => import("../tools/knowledge.js");
  * estas tools solo se la exponen al modelo.
  */
 
+/** Quita la sección "## Diagrama" (el Mermaid, bulto visual) de una ficha de dominios/, dejando Campos+Relaciones. */
+export function stripDiagramSection(body: string): string {
+  return body.replace(/##\s*Diagrama[\s\S]*$/i, "").trim();
+}
+
 /** Cuenta los errores de una salida de tsc ("Found N errors" o, en su defecto, los "error TSxxxx"). */
 export function countTscErrors(output: string): number {
   if (!output) return 0;
@@ -30,8 +35,17 @@ export function countTscErrors(output: string): number {
   return (output.match(/error TS\d+/g) || []).length;
 }
 
+/**
+ * Rastreo (opcional) de qué pantallas se consultaron de verdad con `leer_maqueta` durante una
+ * construcción. No cambia el comportamiento del agente: solo lo hace observable, para poder avisar al
+ * final si se construyó una pantalla sin haber mirado nunca su maqueta.
+ */
+export interface BuildTracking {
+  mockupsConsultadas: Set<string>;
+}
+
 /** Tools de CONOCIMIENTO: papers del proyecto + biblioteca/plantillas doradas (vía RAG y por ruta). */
-function buildKnowledgeTools(cfg: AppConfig, projectId: string): ChatTool[] {
+function buildKnowledgeTools(cfg: AppConfig, projectId: string, tracking?: BuildTracking): ChatTool[] {
   return [
     {
       name: "buscar_documentacion",
@@ -138,6 +152,7 @@ function buildKnowledgeTools(cfg: AppConfig, projectId: string): ChatTool[] {
         if (rel.toLowerCase().endsWith(".preview.html")) rel = rel.replace(/\.preview\.html$/i, ".md");
         if (!rel.toLowerCase().endsWith(".md")) rel = `${rel}.md`;
         rel = `pantallas/${rel.replace(/^pantallas\//i, "")}`;
+        tracking?.mockupsConsultadas.add(rel);
         const previewRel = mockupPathFor(rel);
         try {
           const rootPath = await resolveProjectRoot(projectId);
@@ -192,19 +207,61 @@ function buildKnowledgeTools(cfg: AppConfig, projectId: string): ChatTool[] {
       },
     },
     {
+      name: "listar_dominios",
+      description:
+        "Lista TODAS las entidades del modelo de datos (dominios/) con sus campos y relaciones. Llámalo " +
+        "AL EMPEZAR el dominio: cada entidad necesita su `domain` (entidad+puerto) y su `infrastructure` " +
+        "(repositorio en src/repos/); cada relación listada debe reflejarse en el repositorio (clave " +
+        "foránea + método de consulta relacionado — p.ej. si 'Un Pedido pertenece a un Cliente' → " +
+        "`listarPorClienteId`).",
+      parameters: { type: "object", properties: {} },
+      run: async () => {
+        const { resolveProjectRoot } = await import("./mockup.js");
+        const rootPath = await resolveProjectRoot(projectId);
+        const dir = path.join(rootPath, "dominios");
+        let names: string[] = [];
+        try {
+          names = (await fs.readdir(dir)).filter((n) => n.toLowerCase().endsWith(".md") && !n.startsWith("_"));
+        } catch {
+          return "(este proyecto aún no tiene entidades definidas en dominios/)";
+        }
+        if (!names.length) return "(este proyecto aún no tiene entidades definidas en dominios/)";
+        const { findOneSidedRelations } = await import("./domain-relations.js");
+        const parts: string[] = [];
+        const docs: { slug: string; body: string }[] = [];
+        for (const name of names.sort()) {
+          let body = "";
+          try { body = await fs.readFile(path.join(dir, name), "utf-8"); } catch { continue; }
+          docs.push({ slug: name.replace(/\.md$/i, ""), body });
+          parts.push(`### dominios/${name}\n${stripDiagramSection(body)}`);
+        }
+        const avisos = findOneSidedRelations(docs);
+        const bloqueAvisos = avisos.length
+          ? `\n\n⚠️ AVISOS DE COHERENCIA (relaciones que solo aparecen en un fichero — revísalas antes de dar por buena la entidad):\n${avisos.map((a) => `- ${a.mensaje}`).join("\n")}`
+          : "";
+        return (
+          "Entidades del dominio. Cada una necesita su `domain`+`repo`; cada relación debe reflejarse en " +
+          "el repositorio (clave foránea + método de consulta):\n\n" + parts.join("\n\n---\n\n") + bloqueAvisos
+        );
+      },
+    },
+    {
       name: "actualizar_maqueta",
       description:
         "Actualiza la MAQUETA (.preview.html) de una pantalla con el HTML que refleja lo que has construido. " +
         "Llámalo SOLO si, por un requisito del código o de las reglas, has tenido que DESVIARTE de la maqueta " +
         "original (mover/añadir/quitar algo): así la plantilla queda como reflejo fiel de lo que sale. Pásale " +
-        "la pantalla y el HTML completo del boceto ya actualizado (mismo estilo/paleta que la maqueta original).",
+        "la pantalla, el HTML completo del boceto ya actualizado (mismo estilo/paleta que la maqueta original) " +
+        "y el MOTIVO concreto de la desviación (obligatorio: la maqueta anterior queda archivada con este " +
+        "motivo, no se pierde — no vale un motivo genérico como 'ajuste' o 'mejora').",
       parameters: {
         type: "object",
         properties: {
           pantalla: { type: "string", description: "Ruta o nombre, p.ej. pantallas/login.md o login" },
           html: { type: "string", description: "HTML completo del boceto actualizado" },
+          motivo: { type: "string", description: "Por qué te desviaste de la maqueta original (requisito de código/regla concreto)" },
         },
-        required: ["pantalla", "html"],
+        required: ["pantalla", "html", "motivo"],
       },
       run: async (a) => {
         const { setMockupHtml } = await import("../screens/service.js");
@@ -214,9 +271,11 @@ function buildKnowledgeTools(cfg: AppConfig, projectId: string): ChatTool[] {
         if (!rel.toLowerCase().endsWith(".md")) rel = `${rel}.md`;
         rel = `pantallas/${rel.replace(/^pantallas\//i, "")}`;
         if (!String(a.html ?? "").trim()) return "(no me has pasado el HTML del boceto)";
+        const motivo = String(a.motivo ?? "").trim();
+        if (motivo.length < 10) return "(indica un motivo concreto de la desviación, no genérico — mínimo 10 caracteres)";
         try {
-          await setMockupHtml(projectId, rel, String(a.html));
-          return `Maqueta de ${rel} actualizada — queda como reflejo fiel de lo construido.`;
+          await setMockupHtml(projectId, rel, String(a.html), motivo);
+          return `Maqueta de ${rel} actualizada — queda como reflejo fiel de lo construido (motivo archivado en su historial).`;
         } catch (e: any) {
           return `(no se pudo actualizar la maqueta: ${e?.message ?? e})`;
         }
@@ -231,8 +290,8 @@ function buildBuildTools(ws: string): ChatTool[] {
     {
       name: "instalar_dependencias",
       description:
-        "Instala las dependencias declaradas en package.json de forma aislada (Docker). Llámalo tras " +
-        "crear/editar el package.json o cuando compilar diga 'Cannot find module'.",
+        "Instala las dependencias declaradas en package.json. Llámalo tras crear/editar el " +
+        "package.json o cuando compilar diga 'Cannot find module'.",
       parameters: { type: "object", properties: {} },
       run: async () => {
         const r = await ensureAppDeps(ws, { force: true });
@@ -258,13 +317,13 @@ function buildBuildTools(ws: string): ChatTool[] {
     {
       name: "ejecutar_tests",
       description:
-        "Ejecuta la suite de tests (vitest) en aislamiento. Devuelve cuántos pasan/fallan y el detalle " +
-        "de los que fallan. Los tests son de QA y NO se pueden editar: haz que tu código los satisfaga.",
+        "Ejecuta la suite de tests (vitest). Devuelve cuántos pasan/fallan y el detalle de los que " +
+        "fallan. Los tests son de QA y NO se pueden editar: haz que tu código los satisfaga.",
       parameters: { type: "object", properties: {} },
       run: async () => {
         const v = await runVitest(ws);
         if (!v.ran) return `No se pudieron ejecutar los tests: ${v.error ?? "error desconocido"}`;
-        const head = `${v.passed}/${v.total} pasan, ${v.failed} fallan${v.sandbox === "docker" ? " (contenedor aislado)" : ""}.`;
+        const head = `${v.passed}/${v.total} pasan, ${v.failed} fallan.`;
         const fails = v.tests
           .filter((t) => t.status === "failed")
           .slice(0, 12)
@@ -336,10 +395,10 @@ export function buildAgentTools(
   cfg: AppConfig,
   ws: string,
   projectId: string,
-  opts: { allowDelegation?: boolean } = {},
+  opts: { allowDelegation?: boolean; tracking?: BuildTracking } = {},
 ): ChatTool[] {
   const tools = [
-    ...buildKnowledgeTools(cfg, projectId),
+    ...buildKnowledgeTools(cfg, projectId, opts.tracking),
     ...buildCodeTools(ws),
     ...buildBuildTools(ws),
   ];

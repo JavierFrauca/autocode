@@ -1,0 +1,19 @@
+# Config de empaquetado (electron-builder). El NOMBRE del instalable lo dan "name"/"description" de
+# package.json (el agente los pone acordes a la app) — aquí NO se fija productName/appId a propósito,
+# para no pisar eso.
+directories:
+  output: release
+files:
+  - out/**
+  - node_modules/**
+  - package.json
+# better-sqlite3 (y cualquier otro módulo nativo) no puede vivir empaquetado dentro del asar: se
+# necesita el fichero .node tal cual en disco para poder cargarlo en tiempo de ejecución.
+asarUnpack:
+  - "**/*.node"
+win:
+  target: nsis
+mac:
+  target: dmg
+linux:
+  target: AppImage

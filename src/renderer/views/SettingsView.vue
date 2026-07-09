@@ -4,7 +4,7 @@ import { api } from "../api";
 import { useAppStore } from "../stores";
 import {
   FolderOpen, Bot, CheckCircle, Cloud, Server, Sparkles, Zap, Search, Lock,
-  KeyRound, Plug, ChevronRight, ChevronLeft, CheckCheck, RefreshCw,
+  KeyRound, Plug, Puzzle, ChevronRight, ChevronLeft, CheckCheck, RefreshCw,
 } from "lucide-vue-next";
 
 const app = useAppStore();
@@ -65,6 +65,7 @@ const connecting = ref(false);
 const steps = [
   { id: "folder", title: "Carpeta de trabajo", Icon: FolderOpen },
   { id: "ai",     title: "Servidor de IA",     Icon: Bot },
+  { id: "mcp",    title: "Ampliar el chat",    Icon: Puzzle },
   { id: "verify", title: "Comprobar conexión", Icon: CheckCircle },
 ];
 
@@ -170,13 +171,59 @@ const verifyNames: Record<string, string> = {
 const stepStatus = computed(() => ({
   folder: form.projectsRoot ? "done" : "pending",
   ai: endpointReady.value && form.generation.mainModel && form.generation.fastModel ? "done" : "pending",
+  // Paso opcional: "done" en cuanto se activa algo, pero nunca "pendiente bloqueante" — no hace falta
+  // tocarlo para avanzar.
+  mcp: mcpEntradas.value.some((e) => e.activo) ? "done" : "pending",
   verify: verifyResults.value
     ? (["provider", "main", "fast"].every((k) => verifyResults.value?.[k]?.ok) ? "done" : "error")
     : "pending",
 }));
 
+// ── Biblioteca de MCP ("vitaminar" el chat) ──────────────────────────────────
+// Catálogo CERRADO: no hay forma de añadir uno propio desde aquí, solo activar/rellenar los de la lista.
+interface McpEntrada {
+  id: string; nombre: string; descripcion: string; ventajas: string[]; inconvenientes: string[];
+  estado: "disponible" | "pendiente_de_validar" | "degradado" | "retirado";
+  envRequerido: { clave: string; etiqueta: string; ayuda?: string; relleno: boolean }[];
+  activo: boolean; activable: boolean;
+}
+const mcpEntradas = ref<McpEntrada[]>([]);
+const mcpEnvDraft = reactive<Record<string, Record<string, string>>>({});
+const mcpGuardando = ref<string | null>(null);
+const mcpError = ref<string | null>(null);
+
+const MCP_ESTADO_LABEL: Record<McpEntrada["estado"], string> = {
+  disponible: "Disponible",
+  pendiente_de_validar: "Aún no disponible (en validación)",
+  degradado: "Con problemas conocidos",
+  retirado: "Retirado",
+};
+
+async function loadMcpCatalog() {
+  try {
+    const r = await api.mcpCatalog();
+    mcpEntradas.value = r.entradas;
+    for (const e of r.entradas) mcpEnvDraft[e.id] ??= {};
+  } catch (e: any) {
+    mcpError.value = e?.message ?? "No se pudo cargar la biblioteca de MCP";
+  }
+}
+
+async function toggleMcp(entrada: McpEntrada) {
+  mcpGuardando.value = entrada.id;
+  mcpError.value = null;
+  try {
+    await api.setMcpServer(entrada.id, !entrada.activo, mcpEnvDraft[entrada.id]);
+    await loadMcpCatalog();
+  } catch (e: any) {
+    mcpError.value = e?.message ?? "No se pudo guardar";
+  } finally {
+    mcpGuardando.value = null;
+  }
+}
+
 onMounted(async () => {
-  await Promise.all([load(), loadProviders()]);
+  await Promise.all([load(), loadProviders(), loadMcpCatalog()]);
   // Cloud sin modelos guardados (instalación nueva) → usa los preseleccionados del proveedor.
   if (form.generation.mode === "cloud" && (!form.generation.mainModel || !form.generation.fastModel)) {
     applyPresetModels(form.generation.provider);
@@ -388,12 +435,77 @@ onMounted(async () => {
 
         <div class="step-actions">
           <button class="btn ghost" style="gap:5px" @click="currentStep = 0"><ChevronLeft :size="15" /> Anterior</button>
-          <button class="btn primary" style="gap:5px" @click="save().then(() => currentStep = 2)">Guardar y comprobar <ChevronRight :size="15" /></button>
+          <button class="btn primary" style="gap:5px" @click="save().then(() => currentStep = 2)">Guardar y continuar <ChevronRight :size="15" /></button>
         </div>
       </div>
 
-      <!-- Paso 2: Verificación -->
+      <!-- Paso 2: Ampliar el chat (biblioteca de MCP, cerrada y curada — sin opción de añadir uno
+           propio). Paso OPCIONAL: se puede avanzar sin activar nada. -->
       <div v-show="currentStep === 2" class="step-body">
+        <div class="step-header">
+          <div class="step-header-icon"><Puzzle :size="32" :stroke-width="1.5" /></div>
+          <div>
+            <h2>Ampliar el chat</h2>
+            <p class="muted">
+              Capacidades adicionales que puedes activar para el chat, revisadas por AutoCode. No puedes añadir
+              otras por tu cuenta — así no tienes que juzgar tú si algo de fuera es de fiar. Es opcional: puedes
+              seguir sin activar ninguna.
+            </p>
+          </div>
+        </div>
+
+        <div v-if="mcpError" class="badge bad" style="margin-bottom:12px">{{ mcpError }}</div>
+
+        <div class="mcp-card" v-for="entrada in mcpEntradas" :key="entrada.id">
+          <div class="mcp-card-head">
+            <div>
+              <strong>{{ entrada.nombre }}</strong>
+              <span class="badge" :class="entrada.estado === 'disponible' ? 'ok' : 'bad'" style="margin-left:8px">
+                {{ MCP_ESTADO_LABEL[entrada.estado] }}
+              </span>
+            </div>
+            <button
+              class="btn"
+              :class="entrada.activo ? 'ghost' : 'primary'"
+              :disabled="!entrada.activable || mcpGuardando === entrada.id"
+              @click="toggleMcp(entrada)"
+            >
+              {{ mcpGuardando === entrada.id ? "Guardando…" : entrada.activo ? "Desactivar" : "Activar" }}
+            </button>
+          </div>
+          <p class="muted">{{ entrada.descripcion }}</p>
+          <div class="mcp-pros-cons">
+            <div>
+              <strong class="mcp-pros-cons-title ok">Ventajas</strong>
+              <ul><li v-for="v in entrada.ventajas" :key="v">{{ v }}</li></ul>
+            </div>
+            <div>
+              <strong class="mcp-pros-cons-title bad">Inconvenientes</strong>
+              <ul><li v-for="v in entrada.inconvenientes" :key="v">{{ v }}</li></ul>
+            </div>
+          </div>
+          <div v-if="entrada.envRequerido.length" class="mcp-env">
+            <label v-for="campo in entrada.envRequerido" :key="campo.clave">
+              {{ campo.etiqueta }}
+              <input
+                type="password"
+                v-model="mcpEnvDraft[entrada.id][campo.clave]"
+                :placeholder="campo.relleno ? '••••••••  (ya guardada)' : campo.ayuda ?? ''"
+              />
+            </label>
+          </div>
+        </div>
+
+        <p v-if="!mcpEntradas.length" class="muted">Cargando biblioteca…</p>
+
+        <div class="step-actions">
+          <button class="btn ghost" style="gap:5px" @click="currentStep = 1"><ChevronLeft :size="15" /> Anterior</button>
+          <button class="btn primary" style="gap:5px" @click="currentStep = 3">Siguiente <ChevronRight :size="15" /></button>
+        </div>
+      </div>
+
+      <!-- Paso 3: Verificación -->
+      <div v-show="currentStep === 3" class="step-body">
         <div class="step-header">
           <div class="step-header-icon"><CheckCircle :size="32" :stroke-width="1.5" /></div>
           <div>
@@ -433,10 +545,9 @@ onMounted(async () => {
         </div>
 
         <div class="step-actions">
-          <button class="btn ghost" style="gap:5px" @click="currentStep = 1"><ChevronLeft :size="15" /> Anterior</button>
+          <button class="btn ghost" style="gap:5px" @click="currentStep = 2"><ChevronLeft :size="15" /> Anterior</button>
         </div>
       </div>
-
     </div>
   </div>
 </template>
@@ -698,4 +809,18 @@ onMounted(async () => {
   color: var(--green);
   margin-bottom: 16px;
 }
+
+.mcp-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg, 12px);
+  padding: 18px 20px; margin-bottom: 14px;
+}
+.mcp-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.mcp-pros-cons { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 10px; }
+.mcp-pros-cons-title { font-size: 12px; }
+.mcp-pros-cons-title.ok { color: var(--green); }
+.mcp-pros-cons-title.bad { color: var(--red); }
+.mcp-pros-cons ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; color: var(--text-muted); }
+.mcp-env { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.mcp-env label { font-size: 12px; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px; }
+.mcp-env input { padding: 8px 10px; border-radius: var(--r-sm, 8px); border: 1px solid var(--border); background: var(--bg); color: var(--text); }
 </style>

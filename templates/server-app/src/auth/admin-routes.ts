@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { repos } from "../repos/index.js";
 import { auditar } from "../audit.js";
+import { ROLES } from "./guard.js";
 
 /**
  * Área de ADMINISTRACIÓN (solo rol "admin"): gestión de usuarios y visor del registro de accesos. Todo el
@@ -14,8 +15,9 @@ export async function registerAdminRoutes(app: FastifyInstance): Promise<void> {
     return repos.usuarios.listar();
   });
 
+  // El enum de roles válidos sale de `ROLES` en guard.ts (única fuente de verdad) — nunca lo dupliques aquí.
   const Patch = z.object({
-    rol: z.enum(["admin", "gestor", "usuario"]).optional(),
+    rol: z.enum(ROLES).optional(),
     activo: z.boolean().optional(),
     nombre: z.string().min(1).optional(),
   });

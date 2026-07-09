@@ -9,7 +9,7 @@ pnpm-lock.yaml
 # ─── Salidas de compilación / build ─────────────────────────
 out/
 dist/
-build/
+# NO "build/": es el buildResources de electron-builder (build/icon.png), no una salida — se versiona.
 .output/
 .vite/
 .cache/
@@ -18,7 +18,9 @@ build/
 
 # ─── Empaquetado / instaladores ─────────────────────────────
 release/
-electron-builder.yml
+# Solo el de la raíz (config local/histórica); templates/electron-app/electron-builder.yml SÍ se versiona:
+# es parte del andamiaje dorado que se copia a cada app generada.
+/electron-builder.yml
 
 # ─── Binarios y recursos descargados bajo demanda ───────────
 # modelos de embeddings descargados

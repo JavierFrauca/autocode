@@ -4,10 +4,13 @@
  * (no pantalla en blanco, sin crash de render, DOM con texto). Lo usa `verify-visual.ts` para validar
  * que la app generada RENDERIZA de verdad (no solo que compila).
  *
- * Uso: electron scripts/visual-capture.cjs --url=<file|http> --out=<png> [--verdict=<json>] [--timeout=ms] [--w=1200] [--h=800]
+ * Uso: electron scripts/visual-capture.cjs --url=<file|http> --out=<png> [--verdict=<json>] [--timeout=ms]
+ *      [--w=1200] [--h=800] [--cookie=nombre=valor]
+ * `--cookie`: inyecta una cookie de sesión (httpOnly) ANTES de cargar la URL, para poder capturar
+ * pantallas que exigen login (apps `server`) sin simular clics en el formulario.
  * Exit 0 = ok visual; 1 = renderizó pero con problemas; 2 = no pudo ni cargar.
  */
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, session } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 
@@ -23,6 +26,7 @@ const verdictPath = arg("verdict", out + ".json");
 const timeout = Number(arg("timeout", "15000"));
 const width = Number(arg("w", "1200"));
 const height = Number(arg("h", "800"));
+const cookieArg = arg("cookie"); // "nombre=valor"
 
 // Sin GPU/headless-friendly: en servidores sin aceleración, evita cuelgues de render.
 app.disableHardwareAcceleration();
@@ -61,12 +65,20 @@ app.whenReady().then(() => {
 
   const guard = setTimeout(() => { if (!finished) { findings.push({ type: "timeout" }); capture(false); } }, timeout);
 
+  const COUNT_SCRIPT =
+    "({" +
+    "inputs: document.querySelectorAll('input,select,textarea').length," +
+    "buttons: document.querySelectorAll('button').length," +
+    "tableRows: document.querySelectorAll('tr').length" +
+    "})";
+
   async function capture(loaded) {
     if (finished) return;
     finished = true;
     clearTimeout(guard);
     let blank = null;
     let textLen = null;
+    let counts = null;
     try {
       const img = await win.webContents.capturePage();
       const png = img.toPNG();
@@ -80,16 +92,35 @@ app.whenReady().then(() => {
       textLen = await win.webContents.executeJavaScript("document.body ? document.body.innerText.trim().length : 0");
       if (textLen === 0) findings.push({ type: "empty-dom" });
     } catch {}
+    try {
+      counts = await win.webContents.executeJavaScript(COUNT_SCRIPT);
+    } catch {}
     const fatal = findings.some((f) => ["renderer-gone", "did-fail-load", "load-throw", "timeout"].includes(f.type));
     const ok = !!loaded && !fatal && blank !== true && (textLen == null || textLen > 0);
-    writeVerdict(ok, { blank, textLen });
+    writeVerdict(ok, { blank, textLen, counts });
     app.exit(ok ? 0 : 1);
   }
 
   win.webContents.once("did-finish-load", () => setTimeout(() => capture(true), 800));
 
-  const loader = /^https?:/i.test(url) ? win.loadURL(url) : win.loadFile(url);
-  Promise.resolve(loader).catch((e) => {
+  async function start() {
+    if (cookieArg) {
+      const eq = cookieArg.indexOf("=");
+      if (eq > 0) {
+        const name = cookieArg.slice(0, eq);
+        const value = cookieArg.slice(eq + 1);
+        try {
+          await session.defaultSession.cookies.set({ url, name, value, httpOnly: true, sameSite: "lax" });
+        } catch (e) {
+          findings.push({ type: "cookie-set-throw", message: String((e && e.message) || e).slice(0, 200) });
+        }
+      }
+    }
+    const loader = /^https?:/i.test(url) ? win.loadURL(url) : win.loadFile(url);
+    return Promise.resolve(loader);
+  }
+
+  start().catch((e) => {
     findings.push({ type: "load-throw", message: String((e && e.message) || e).slice(0, 200) });
     capture(false);
   });

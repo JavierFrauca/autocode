@@ -1,8 +1,9 @@
 import type { AppConfig, AppType } from "@shared";
 import { runToolLoop, type ChatMessage } from "../llm/client.js";
 import { loadPrompt } from "../prompts.js";
-import { buildAgentTools, countTscErrors } from "./agent-tools.js";
+import { buildAgentTools, countTscErrors, type BuildTracking } from "./agent-tools.js";
 import { listAppFiles, readAppFile } from "./code-workspace.js";
+import { listProjectScreens, resolveProjectRoot } from "./mockup.js";
 import { runVitest, typecheckApp, type VitestResult } from "./qa-exec.js";
 import { log } from "../log.js";
 
@@ -104,6 +105,10 @@ export interface BuilderResult {
   cycles: number;
   /** Al parar: la UI seguía siendo el placeholder (no se construyeron las pantallas reales). */
   uiPending: boolean;
+  /** Pantallas del proyecto cuya maqueta NUNCA se consultó con `leer_maqueta` en toda la construcción
+   *  (aviso, no bloquea): señal de que el agente pudo construirlas sin partir de su boceto. Vacío si no
+   *  aplica (apps sin UI, o fase de tests). */
+  mockupsUnread: string[];
 }
 
 /** Dependencias inyectables (para test): por defecto, el bucle de tools real y el prompt del disco. */
@@ -111,11 +116,45 @@ export interface BuilderDeps {
   toolLoop?: typeof runToolLoop;
   /** System prompt ya resuelto (evita tocar el disco/electron en test). */
   systemPrompt?: string;
+  /** Resolución de proyecto→carpeta y listado de pantallas para `mockupsUnread` (evita tocar la BD real en test). */
+  resolveRootPath?: typeof resolveProjectRoot;
+  listProjectScreens?: typeof listProjectScreens;
 }
 
 const MAX_GATE_CYCLES = 8;        // cuántas veces reabrimos al agente tras un gate en rojo
 const TOOL_ROUNDS_PER_CYCLE = 18; // rondas de tool-calling dentro de cada ciclo
-const STALL_LIMIT = 3;            // ciclos seguidos sin mejorar la métrica → estancado
+const STALL_LIMIT = 3;            // ciclos seguidos sin mejorar la métrica → estancado (UI/tests: aquí SÍ puede
+                                   // ayudar una aclaración del usuario, así que no insistimos de más)
+// Fallos de COMPILACIÓN son distintos: el usuario NO SABE PROGRAMAR, así que enseñarle un error de
+// TypeScript no le sirve de nada — solo el agente puede resolverlo. Le damos más margen antes de
+// rendirse y pedirle ayuda a una persona que no puede dársela.
+const COMPILE_STALL_LIMIT = 6;
+// Nº de líneas iniciales del error que comparamos para detectar "sigue siendo el MISMO fallo".
+const ERROR_SIGNATURE_LINES = 3;
+
+/**
+ * Pantallas del proyecto cuya maqueta nunca se consultó con `leer_maqueta` en esta construcción. Solo
+ * aplica a apps con UI (electron/server) en la fase "app" (la fase "tests" no toca pantallas). Best-effort:
+ * si no se puede resolver el proyecto, no bloquea — devuelve vacío.
+ */
+export async function computeMockupsUnread(opts: BuilderOptions, tracking: BuildTracking, deps: BuilderDeps = {}): Promise<string[]> {
+  const hasUi = opts.appType === "electron" || opts.appType === "server";
+  if (!hasUi || opts.goal === "tests") return [];
+  const resolveRoot = deps.resolveRootPath ?? resolveProjectRoot;
+  const listScreens = deps.listProjectScreens ?? listProjectScreens;
+  try {
+    const rootPath = await resolveRoot(opts.projectId);
+    const screens = await listScreens(rootPath);
+    return screens.filter((s) => !tracking.mockupsConsultadas.has(s.rel)).map((s) => s.slug);
+  } catch {
+    return [];
+  }
+}
+
+/** Firma corta del error de compilación (para detectar si el agente repite el mismo fallo ciclo tras ciclo). */
+function errorSignature(errors: string): string {
+  return errors.split("\n").slice(0, ERROR_SIGNATURE_LINES).join("\n").trim();
+}
 
 /** Métrica de progreso (cuanto menor, mejor). Fases: no-compila ≫ UI-placeholder ≫ faltan-tests ≫ tests-rojos ≫ verde. */
 function gateMetric(compileRan: boolean, compiledGreen: boolean, compileErrors: number, vitest: VitestResult | null, uiPending: boolean, testsPending: boolean): number {
@@ -172,7 +211,8 @@ function buildIntro(opts: BuilderOptions): string {
     "cambies SQLite por Postgres (SQLite es local; Postgres solo en producción). Tus pasos: (1) instalar_dependencias, " +
     "(2) compilar, (3) AÑADIR el dominio real: entidades/servicios y rutas API en src/ (adaptador→aplicación→dominio) " +
     "y ELIMINAR el demo 'items' del todo (borrar_fichero src/repos/items.repo.ts; quita `items` de src/repos/index.ts, " +
-    "la tabla items de src/db.ts y las rutas /api/items de src/routes.ts); y las PANTALLAS reales en web/src como VISTAS nuevas en web/src/views, " +
+    "la tabla items de src/db.ts y las rutas /api/items de src/routes.ts — y actualiza o borra cualquier test en " +
+    "tests/ que quede huérfano al referenciar 'items'); y las PANTALLAS reales en web/src como VISTAS nuevas en web/src/views, " +
     "registrándolas en router.ts CON `meta.menu` (icono SVG + orden) — el MENÚ LATERAL se DERIVA del router " +
     "automáticamente, NO toques AppSidebar.vue. Reemplaza la vista placeholder web/src/views/InicioView.vue " +
     "por la primera pantalla real. NO toques App.vue (el shell) salvo para detalles de marca. La app debe seguir " +
@@ -194,12 +234,19 @@ function buildIntro(opts: BuilderOptions): string {
     "INFRAESTRUCTURA PERMANENTE — NO la recrees ni la borres: src/renderer/src/App.vue (shell con menú lateral + " +
     "cabecera + router), src/renderer/src/router.ts (rutas), src/renderer/src/components/AppSidebar.vue (menú) y la " +
     "vista placeholder src/renderer/src/views/InicioView.vue. (Las apps de ESCRITORIO NO llevan login ni auditoría: " +
-    "son monopuesto/locales.) NO cambies la estructura ni el build. Tus pasos: (1) instalar_dependencias, (2) compilar " +
-    "para confirmar el verde de partida, (3) AÑADIR ENCIMA: el dominio y los casos de uso en src/main (entidades, " +
-    "servicios, y el IPC en src/main para exponerlos por preload), y las PANTALLAS reales como VISTAS nuevas en " +
-    "src/renderer/src/views, registrándolas en router.ts CON `meta.menu` (icono SVG + orden) — el MENÚ LATERAL se " +
-    "DERIVA del router automáticamente, NO toques AppSidebar.vue. MANTÉN el renderizado y la " +
-    "CSP del index.html; no toques App.vue (el shell) salvo detalles de marca. " +
+    "son monopuesto/locales.) Trae YA persistencia con SQLite embebido (better-sqlite3, sin instalación): " +
+    "src/main/db.ts (initDb, fichero en app.getPath('userData')) y src/main/repos/ (patrón repository — " +
+    "items.repo.ts de ejemplo + index.ts como composition root), con su IPC de ejemplo ya cableado en " +
+    "src/main/index.ts y expuesto en preload. NO cambies la estructura ni el build. Tus pasos: " +
+    "(1) instalar_dependencias, (2) compilar para confirmar el verde de partida, (3) AÑADIR el dominio real: " +
+    "un fichero `<entidad>.repo.ts` por entidad en src/main/repos (mismo patrón que items.repo.ts) registrado en " +
+    "repos/index.ts, sus casos de uso y el IPC en src/main/index.ts para exponerlos por preload — y ELIMINAR el " +
+    "demo 'items' del todo (borrar src/main/repos/items.repo.ts, quitar 'items' de repos/index.ts, la tabla items " +
+    "de src/main/db.ts, los canales ipcMain.handle('items:...') de index.ts, el bloque items de preload/index.ts, " +
+    "y BORRA tests/items.repo.test.ts — es un test de ejemplo SOLO sobre 'items', se queda huérfano al borrarlo); " +
+    "y las PANTALLAS reales como VISTAS nuevas en src/renderer/src/views, registrándolas en router.ts CON " +
+    "`meta.menu` (icono SVG + orden) — el MENÚ LATERAL se DERIVA del router automáticamente, NO toques " +
+    "AppSidebar.vue. MANTÉN el renderizado y la CSP del index.html; no toques App.vue (el shell) salvo detalles de marca. " +
     "IMPORTANTE: ahora mismo la vista de inicio (views/InicioView.vue) es un PLACEHOLDER. Tu entrega NO está hecha " +
     "mientras siga el placeholder: DEBES reemplazar InicioView.vue por la primera pantalla real (y crear el resto de " +
     "vistas) de la app descrita en el plan. Compilar en verde NO es el objetivo: el objetivo es que la app MUESTRE y " +
@@ -217,7 +264,8 @@ function buildIntro(opts: BuilderOptions): string {
     "(para 'Probar'); (d) tareas programadas en src/jobs.ts. NO añadas interfaz/SPA/Vue (es API pura). Tus pasos: " +
     "(1) instalar_dependencias, (2) compilar, (3) AÑADIR el dominio real: endpoints en src/routes.ts (reemplaza el CRUD " +
     "de ejemplo 'items' y el webhook de ejemplo), entidades/servicios por capas, y las tareas programadas reales en " +
-    "src/jobs.ts. Audita las acciones sensibles. NO cambies SQLite por Postgres (SQLite es local; Postgres en producción).";
+    "src/jobs.ts — actualiza o borra cualquier test en tests/ que quede huérfano al referenciar 'items'. Audita las " +
+    "acciones sensibles. NO cambies SQLite por Postgres (SQLite es local; Postgres en producción).";
 
   const parts: string[] = [
     `Vas a ${opts.repair ? "REPARAR" : "CONSTRUIR"} esta aplicación. Tipo de app: **${tipo}**.`,
@@ -258,6 +306,7 @@ function buildContinuation(
   uiPending: boolean,
   testsPending: boolean,
   opts: BuilderOptions,
+  errorRepeatStreak = 0,
 ): string {
   const lines: string[] = [`## Estado tras el ciclo ${cycle} (verificación real del sistema)`];
   if (!compile.ran) {
@@ -266,9 +315,16 @@ function buildContinuation(
         "Copia el andamiaje dorado del tipo de app con leer_plantilla, instálalo y compílalo.",
     );
   } else if (!compile.ok) {
+    const insiste = errorRepeatStreak >= 2
+      ? `\n\nLLEVAS ${errorRepeatStreak} CICLOS SEGUIDOS CON EXACTAMENTE EL MISMO ERROR: repetir el mismo cambio no va a ` +
+        "arreglarlo. CAMBIA DE ESTRATEGIA: lee el mensaje de TypeScript LITERALMENTE (fichero y línea exactos que indica), " +
+        "comprueba con leer_fichero ese punto exacto en vez de asumir, y si tu último cambio no lo arregló, REVIÉRTELO " +
+        "antes de probar algo distinto. Si es un tipo/import que no encuentras, busca el contrato real con " +
+        "listar_ficheros/leer_fichero en vez de inventar la firma."
+      : "";
     lines.push(
       `La app NO compila: ${compileErrors} error(es). Lee los ficheros implicados, corrige y vuelve a compilar. ` +
-        `Errores:\n\n${compile.errors.slice(0, 5000)}`,
+        `Errores:\n\n${compile.errors.slice(0, 5000)}${insiste}`,
     );
   } else if (uiPending) {
     const base = opts.appType === "server" ? "web/src" : "src/renderer/src";
@@ -311,7 +367,8 @@ function buildContinuation(
  */
 export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOptions, deps: BuilderDeps = {}): Promise<BuilderResult> {
   const toolLoop = deps.toolLoop ?? runToolLoop;
-  const tools = buildAgentTools(cfg, ws, opts.projectId);
+  const tracking: BuildTracking = { mockupsConsultadas: new Set() };
+  const tools = buildAgentTools(cfg, ws, opts.projectId, { tracking });
   const system = deps.systemPrompt ?? await loadPrompt("builder-system");
 
   let lastCompile = { ran: false, ok: false, errors: "" };
@@ -321,6 +378,8 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
   let lastTestsPending = false;
   let bestMetric = Number.POSITIVE_INFINITY;
   let stall = 0;
+  let lastErrorSig = "";
+  let errorRepeatStreak = 0;
   let cycle = 0;
   // Presupuesto de ciclos: escala con el tamaño del plan (lo calcula el executor). Acotado por sanidad.
   const maxCycles = Math.max(3, Math.min(40, opts.maxCycles ?? MAX_GATE_CYCLES));
@@ -328,7 +387,7 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
   for (; cycle < maxCycles; cycle++) {
     const userMsg = cycle === 0
       ? buildIntro(opts)
-      : buildContinuation(cycle, lastCompile, lastErrors, lastVitest, lastUiPending, lastTestsPending, opts);
+      : buildContinuation(cycle, lastCompile, lastErrors, lastVitest, lastUiPending, lastTestsPending, opts, errorRepeatStreak);
     const messages: ChatMessage[] = [
       { role: "system", content: system },
       { role: "user", content: userMsg },
@@ -339,7 +398,7 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
       log.warn("builder", "el modelo de rol 'code' no soporta function-calling — el agente único no puede operar");
       return {
         status: "unsupported", compiledGreen: false, compileErrors: 0, compileOutput: "",
-        testsRan: false, testsFailed: 0, testsTotal: 0, cycles: cycle, uiPending: false,
+        testsRan: false, testsFailed: 0, testsTotal: 0, cycles: cycle, uiPending: false, mockupsUnread: [],
       };
     }
     await opts.progress?.onCycle?.(cycle, loop.toolsUsed);
@@ -358,7 +417,7 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
     if (compiledGreen && anyTests) vitest = await runVitest(ws);
     lastVitest = vitest;
 
-    // Si las pruebas existentes NO se pudieron ejecutar (p.ej. requieren Docker y no hay) o no había
+    // Si las pruebas existentes NO se pudieron ejecutar (p.ej. node_modules no instalado aún) o no había
     // ninguna, son INCONCLUSAS: no marcan rojo por sí solas (el "faltan tests" lo lleva testsPending).
     const testsInconclusive = anyTests && (!vitest || !vitest.ran || vitest.total === 0);
     const testsGreen = !anyTests || testsInconclusive
@@ -384,19 +443,30 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
 
     if (compiledGreen && testsGreen && !uiPending && !testsPending) {
       log.info("builder", "verde", { cycle, tools: loop.toolsUsed.length });
+      const mockupsUnread = await computeMockupsUnread(opts, tracking, deps);
+      if (mockupsUnread.length) log.warn("builder", "pantallas construidas sin consultar su maqueta", { mockupsUnread });
       return {
         status: "green", compiledGreen: true, compileErrors: 0, compileOutput: compile.errors,
         testsRan: !!vitest?.ran, testsFailed: vitest?.failed ?? 0, testsTotal: vitest?.total ?? 0, cycles: cycle + 1,
-        uiPending: false,
+        uiPending: false, mockupsUnread,
       };
     }
 
+    // ── Repetición de error: ¿el ciclo anterior ya vio EXACTAMENTE este mismo fallo de compilación? ──
+    const errSig = compiledGreen ? "" : errorSignature(compile.errors);
+    errorRepeatStreak = !compiledGreen && errSig && errSig === lastErrorSig ? errorRepeatStreak + 1 : errSig ? 1 : 0;
+    lastErrorSig = errSig;
+
     // ── Estancamiento ──────────────────────────────────────────────────────────────────────
+    // Límite distinto según la fase: en compilación el usuario NO puede ayudar (no sabe programar), así
+    // que el agente insiste más antes de rendirse; en UI/tests una aclaración del usuario sí puede
+    // desbloquear, así que no le hacemos esperar de más.
     const metric = gateMetric(compile.ran, compiledGreen, compileErrors, vitest, uiPending, testsPending);
     if (metric < bestMetric) { bestMetric = metric; stall = 0; } else { stall++; }
-    log.info("builder", "gate en rojo", { cycle, compiledGreen, compileErrors, testsFailed: vitest?.failed ?? null, stall });
-    if (stall >= STALL_LIMIT) {
-      log.warn("builder", "estancado", { cycle, bestMetric, stall });
+    const stallLimit = !compiledGreen ? COMPILE_STALL_LIMIT : STALL_LIMIT;
+    log.info("builder", "gate en rojo", { cycle, compiledGreen, compileErrors, testsFailed: vitest?.failed ?? null, stall, stallLimit, errorRepeatStreak });
+    if (stall >= stallLimit) {
+      log.warn("builder", "estancado", { cycle, bestMetric, stall, stallLimit, compileErrors: lastErrors, compileOutput: compile.errors.slice(0, 3000) });
       break;
     }
   }
@@ -411,5 +481,6 @@ export async function runBuilder(cfg: AppConfig, ws: string, opts: BuilderOption
     testsTotal: lastVitest?.total ?? 0,
     cycles: cycle,
     uiPending: lastUiPending,
+    mockupsUnread: await computeMockupsUnread(opts, tracking, deps),
   };
 }

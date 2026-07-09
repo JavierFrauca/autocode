@@ -23,8 +23,8 @@ El usuario nunca ve código mientras conversa. Ve chat, documentos renderizados 
 pantallas** y **«Modificar con IA»** sobre cada boceto), búsqueda semántica sobre lo que ha ido
 decidiendo, una pestaña **Ejecutar** para probar y distribuir la app, y al final un artefacto ejecutable.
 
-> **Importante:** Docker es solo para **las apps que AutoCode genera** (y, opcionalmente, para aislar
-> sus pruebas). **AutoCode en sí NO necesita Docker** ni servidores externos.
+> **Importante:** Docker es solo para **las apps que AutoCode genera** (su paquete de despliegue).
+> **AutoCode en sí NO necesita Docker** ni servidores externos.
 
 ## 2. Para quién
 

@@ -1,6 +1,6 @@
 {
   "name": "autocode",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "private": true,
   "main": "out/main/index.js",
   "scripts": {
@@ -35,13 +35,16 @@
     "markdown-it": "^14.1.0",
     "markdown-it-anchor": "^9.2.0",
     "mermaid": "^11.4.0",
+    "open-websearch": "2.1.11",
     "openai": "^4.73.1",
     "pdf-parse": "^2.4.5",
     "pinia": "^2.2.6",
     "shiki": "^1.24.0",
     "tar": "^7.4.3",
     "turndown": "^7.2.4",
+    "typescript": "^5.6.3",
     "ulid": "^2.3.0",
+    "vitest": "^2.1.5",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0",
     "zod": "^3.23.8"
@@ -62,9 +65,7 @@
     "drizzle-kit": "^0.28.1",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
-    "electron-vite": "^2.3.0",
-    "typescript": "^5.6.3",
-    "vitest": "^2.1.5"
+    "electron-vite": "^2.3.0"
   },
   "build": {
     "appId": "com.autocode.desktop",
@@ -73,6 +74,9 @@
       "out/**",
       "node_modules/**",
       "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/**/*"
     ],
     "extraResources": [
       {
@@ -90,6 +94,17 @@
       {
         "from": "vendor/nucleus",
         "to": "vendor/nucleus"
+      },
+      {
+        "from": "mcp-internal",
+        "to": "mcp-internal"
+      },
+      {
+        "from": "node_modules/typescript/lib",
+        "to": "app.asar.unpacked/node_modules/typescript/lib",
+        "filter": [
+          "*.d.ts"
+        ]
       }
     ],
     "directories": {

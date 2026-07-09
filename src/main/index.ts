@@ -12,6 +12,10 @@ async function createWindow(): Promise<BrowserWindow> {
     width: 1280,
     height: 860,
     backgroundColor: "#0f1115",
+    // Empaquetado: el icono real es el embebido en el .exe por electron-builder (build/icon.png). Esto
+    // solo cubre el modo desarrollo (npm run dev), donde si no, la ventana/barra de tareas muestra el
+    // icono por defecto de Electron.
+    icon: isDev ? path.join(__dirname, "../../build/icon.png") : undefined,
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
       nodeIntegration: false,

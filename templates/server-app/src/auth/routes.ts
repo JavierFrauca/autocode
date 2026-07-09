@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { repos } from "../repos/index.js";
 import { firmarSesion } from "./tokens.js";
-import { COOKIE_SESION } from "./guard.js";
+import { COOKIE_SESION, ROLES } from "./guard.js";
 import { auditar } from "../audit.js";
 
 /**
@@ -59,11 +59,12 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
 
   // Alta de cuentas: por defecto SOLO un admin puede crear usuarios. Si el dominio necesita auto-registro
   // abierto, marca esta ruta como { publico: true } (decisión del ADR).
+  // El enum de roles válidos sale de `ROLES` en guard.ts (única fuente de verdad) — nunca lo dupliques aquí.
   const Registro = z.object({
     email: z.string().email(),
     password: z.string().min(8, "mínimo 8 caracteres"),
     nombre: z.string().min(1),
-    rol: z.enum(["admin", "gestor", "usuario"]).optional(),
+    rol: z.enum(ROLES).optional(),
   });
 
   app.post("/api/auth/registro", { config: { roles: ["admin"] } }, async (req, reply) => {

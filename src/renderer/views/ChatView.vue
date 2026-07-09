@@ -111,7 +111,9 @@ async function loadScope() {
 // ── Previews de pantalla embebidas en el chat ────────────────────────────────
 // Cuando el documenter crea/actualiza una pantalla en un turno, el servidor la devuelve en
 // `metadata.screens`. Cargamos su boceto (el `html` que ya expone `listScreens`) para mostrarlo en
-// línea. La maqueta se genera en segundo plano, así que reintentamos hasta que exista.
+// línea. La maqueta se genera de forma SÍNCRONA dentro del turno (el servidor espera a que exista
+// antes de responder), así que normalmente ya está lista a la primera; el reintento es solo un
+// colchón defensivo (lag de índice, o si el servidor tardó más de lo normal).
 const screenPreviews = ref<Record<string, { html: string | null; loading: boolean }>>({});
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -147,6 +149,33 @@ function messageScreens(m: any): string[] {
 }
 function openScreenInEditor(path: string): void {
   router.push(`/projects/${projectId.value}/screens?slug=${encodeURIComponent(screenSlugOf(path))}`);
+}
+
+// ── Resultados de búsqueda web embebidos en el chat ──────────────────────────
+// Cuando el chat usa el MCP de búsqueda, el servidor devuelve `metadata.searchResults` — se pinta una
+// tarjeta por resultado con un botón "Adjuntar" que lo descarga y registra como documento del proyecto
+// (mismo camino ya reforzado: detecta PDF/XSD/ZIP, límite de tamaño) sin que el usuario tenga que pedirle
+// la URL al modelo ni copiarla a mano.
+interface SearchResultado { titulo: string; url: string; descripcion: string }
+function messageSearchResults(m: any): SearchResultado[] {
+  const r = m?.metadata?.searchResults;
+  return Array.isArray(r) ? r : [];
+}
+const adjuntando = ref<Record<string, boolean>>({});
+const adjuntados = ref<Record<string, boolean>>({});
+const adjuntarError = ref<Record<string, string>>({});
+async function adjuntarResultado(url: string): Promise<void> {
+  if (!projectId.value || adjuntando.value[url] || adjuntados.value[url]) return;
+  adjuntando.value = { ...adjuntando.value, [url]: true };
+  adjuntarError.value = { ...adjuntarError.value, [url]: "" };
+  try {
+    await api.attachUrl(projectId.value, url);
+    adjuntados.value = { ...adjuntados.value, [url]: true };
+  } catch (e: any) {
+    adjuntarError.value = { ...adjuntarError.value, [url]: e?.message ?? "No se pudo adjuntar" };
+  } finally {
+    adjuntando.value = { ...adjuntando.value, [url]: false };
+  }
 }
 
 // Carga los bocetos de las pantallas que aparezcan en los mensajes (turno nuevo o historial).
@@ -306,25 +335,34 @@ function pushNote(content: string, error = false) {
 
 function pickFile() { fileInputEl.value?.click(); }
 
+// Varios ficheros de golpe: se procesan uno detrás de otro (no en paralelo) porque los documentos
+// técnicos numeran secuencialmente (DT-001, DT-002…) leyendo "el siguiente número" del disco — en
+// paralelo dos ficheros podrían leer el mismo número y pisarse. `tecnico` se fija UNA vez al principio
+// del lote (si no, tras el primer fichero se desactivaría y el resto no quedaría marcado como técnico).
 async function onFilePicked(e: Event) {
   const el = e.target as HTMLInputElement;
-  const f = el.files?.[0];
+  const files = Array.from(el.files ?? []);
   el.value = "";
-  if (!f) return;
+  if (!files.length) return;
   attaching.value = true;
+  const tecnico = techMode.value;
   try {
-    const r = await api.attachFile(projectId.value, f, { tecnico: techMode.value });
-    pushNote(
-      r.kind === "resource"
-        ? `📎 He guardado **${r.name}** en Recursos — lo usaré en el diseño de la app.`
-        : r.kind === "technical"
-          ? `📐 He registrado **${r.name}** como documento técnico — lo seguiré al pie de la letra al construir la app.`
-          : `📎 He guardado **${r.name}** en Documentos — lo tendré en cuenta como referencia.`,
-    );
-    techMode.value = false;
-  } catch (err: any) {
-    pushNote(`No pude adjuntar el archivo: ${err?.message ?? err}`, true);
+    for (const f of files) {
+      try {
+        const r = await api.attachFile(projectId.value, f, { tecnico });
+        pushNote(
+          r.kind === "resource"
+            ? `📎 He guardado **${r.name}** en Recursos — lo usaré en el diseño de la app.`
+            : r.kind === "technical"
+              ? `📐 He registrado **${r.name}** como documento técnico — lo seguiré al pie de la letra al construir la app.`
+              : `📎 He guardado **${r.name}** en Documentos — lo tendré en cuenta como referencia.`,
+        );
+      } catch (err: any) {
+        pushNote(`No pude adjuntar **${f.name}**: ${err?.message ?? err}`, true);
+      }
+    }
   } finally {
+    techMode.value = false;
     attaching.value = false;
   }
 }
@@ -543,6 +581,25 @@ watch(projectId, loadSessions);
               </div>
               <div class="screen-hint">¿Hay que cambiar algo? Dímelo por el chat y lo actualizo.</div>
             </div>
+            <!-- Resultados de la búsqueda web de este turno -->
+            <div v-if="messageSearchResults(m).length" class="search-results">
+              <div v-for="r in messageSearchResults(m)" :key="r.url" class="search-card">
+                <div class="search-card-title">{{ r.titulo }}</div>
+                <div class="search-card-url">{{ r.url }}</div>
+                <p class="search-card-desc">{{ r.descripcion }}</p>
+                <div class="search-card-actions">
+                  <button
+                    class="btn"
+                    :class="adjuntados[r.url] ? 'ghost' : 'primary'"
+                    :disabled="adjuntando[r.url] || adjuntados[r.url]"
+                    @click="adjuntarResultado(r.url)"
+                  >
+                    {{ adjuntados[r.url] ? '✓ Adjuntado' : adjuntando[r.url] ? 'Adjuntando…' : 'Adjuntar' }}
+                  </button>
+                  <span v-if="adjuntarError[r.url]" class="search-card-error">{{ adjuntarError[r.url] }}</span>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- Sistema (errores) -->
@@ -574,7 +631,7 @@ watch(projectId, loadSessions);
       <!-- Input -->
       <div class="chat-input">
         <input
-          ref="fileInputEl" type="file" style="display:none" @change="onFilePicked"
+          ref="fileInputEl" type="file" multiple style="display:none" @change="onFilePicked"
           accept=".md,.txt,.xml,.xsd,.json,.csv,.yaml,.yml,.html,.pdf,.docx,.png,.jpg,.jpeg,.gif,.webp,.svg,.avif,.ico"
         />
         <div v-if="urlMode" class="attach-url-row">
@@ -590,7 +647,7 @@ watch(projectId, loadSessions);
           <button class="attach-btn" title="Cerrar" @click="urlMode = false"><X :size="16" /></button>
         </div>
         <div class="chat-input-row">
-          <button class="attach-btn" title="Adjuntar un archivo" :disabled="attaching || sending" @click="pickFile">
+          <button class="attach-btn" title="Adjuntar uno o varios archivos" :disabled="attaching || sending" @click="pickFile">
             <Paperclip :size="18" :stroke-width="2" />
           </button>
           <button class="attach-btn" :class="{ on: urlMode }" title="Adjuntar un enlace" :disabled="attaching || sending" @click="urlMode = !urlMode">
@@ -867,6 +924,18 @@ watch(projectId, loadSessions);
   color: var(--text-muted);
 }
 .screen-hint { flex-basis: 100%; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.search-results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.search-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+}
+.search-card-title { font-weight: 500; font-size: 13px; }
+.search-card-url { font-size: 11px; color: var(--text-muted); word-break: break-all; margin-top: 2px; }
+.search-card-desc { font-size: 12px; color: var(--text-muted); margin: 6px 0 8px; }
+.search-card-actions { display: flex; align-items: center; gap: 10px; }
+.search-card-error { font-size: 11px; color: var(--red, #dc2626); }
 .phase-chip-inline {
   display: inline-flex;
   align-items: center;

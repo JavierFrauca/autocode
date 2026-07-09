@@ -28,6 +28,10 @@ export interface ScopeInventory {
   hasAuthSection: boolean;
   /** Existe un ADR de roles/permisos (solo aplica a web). */
   hasRolesDoc: boolean;
+  /** El ADR de arquitectura tiene sección de motor de base de datos (solo aplica a web/api). */
+  hasDbEngineDecision: boolean;
+  /** El ADR de arquitectura tiene la decisión de multiempresa (solo aplica a web). */
+  hasMultiTenantDecision: boolean;
   /** Slugs de las entidades del modelo de datos (`dominios/<slug>.md`). */
   entidades: string[];
   /** Nº de pantallas en el mapa de estructura (`pantallas/_mapa.md`). */
@@ -129,6 +133,35 @@ export function computeScope(inv: ScopeInventory): ScopeReport {
               "¿Habrá distintos tipos de usuario (por ejemplo administradores y usuarios normales)? ¿Qué puede hacer cada uno; alguien puede borrar cosas y otros no?",
           },
     );
+    // 4a) Multiempresa — solo web (aislamiento de datos entre organizaciones distintas en la misma app).
+    items.push(
+      inv.hasMultiTenantDecision
+        ? { key: "multiempresa", label: "Una empresa o varias", status: "ok", detail: "definido en el ADR de arquitectura" }
+        : {
+            key: "multiempresa",
+            label: "Una empresa o varias",
+            status: "missing",
+            detail: "sin definir",
+            question:
+              "¿La va a usar UNA sola empresa/organización, o VARIAS que no deben ver los datos unas de otras (multiempresa)?",
+          },
+    );
+  }
+
+  // 4b) Motor de base de datos — solo web/api (server local es SQLite; esto decide qué se prepara para producción).
+  if (web || t === "api") {
+    items.push(
+      inv.hasDbEngineDecision
+        ? { key: "motor-datos", label: "Base de datos para producción", status: "ok", detail: "definido en el ADR de arquitectura" }
+        : {
+            key: "motor-datos",
+            label: "Base de datos para producción",
+            status: "missing",
+            detail: "sin definir",
+            question:
+              "¿Cuánta gente la va a usar a la vez, y esperas mucho volumen de datos? Si es poca gente o uso ligero, con lo de serie (SQLite) sobra; si esperas bastante gente conectada a la vez o mucho volumen, conviene preparar PostgreSQL de cara a cuando se ponga en producción.",
+          },
+    );
   }
 
   // 5) Pantallas — solo apps con UI (la estructura sale del mapa `pantallas/_mapa.md`).
@@ -182,6 +215,79 @@ async function listMd(rootPath: string, folder: string): Promise<string[]> {
   }
 }
 
+/** Lee el contenido de varios `.md` de una carpeta (best-effort; ignora los que fallen). */
+async function readMdBodies(rootPath: string, folder: string, names: string[]): Promise<string[]> {
+  const bodies = await Promise.all(
+    names.map((n) => fs.readFile(path.join(rootPath, folder, n), "utf-8").catch(() => "")),
+  );
+  return bodies;
+}
+
+/**
+ * Normaliza un slug de entidad para DEDUPLICAR variantes del mismo dominio (p.ej. `cliente` y
+ * `clientes`, que un modelo puede crear en turnos distintos con nombres ligeramente distintos): quita
+ * acentos y separadores, y deshace el plural mas comun en castellano (vocal + "s": cliente/clientes,
+ * factura/facturas). NO intenta el plural en "-es" de sustantivos acabados en consonante
+ * (proveedor/proveedores): es ambiguo sin diccionario, y aqui preferimos un falso negativo (no
+ * deduplicar) a un falso positivo (fusionar dos entidades distintas). Solo se usa para CONTAR
+ * entidades en el informe de cobertura — no renombra ni borra ficheros.
+ */
+export function normalizeEntitySlug(slug: string): string {
+  let s = slug.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  s = s.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (s.endsWith("s") && s.length > 4) s = s.slice(0, -1);
+  return s;
+}
+
+/** Colapsa slugs que representan la MISMA entidad (mismo nombre normalizado); conserva el más corto. */
+export function dedupeEntidades(slugs: string[]): string[] {
+  const byNorm = new Map<string, string>();
+  for (const s of slugs) {
+    const norm = normalizeEntitySlug(s);
+    const existing = byNorm.get(norm);
+    if (!existing || s.length < existing.length) byNorm.set(norm, s);
+  }
+  return [...byNorm.values()];
+}
+
+/**
+ * ¿Tiene ESTE fichero de decisiones pinta de ser el ADR de roles/permisos? Antes se miraba solo el
+ * NOMBRE del fichero (falso negativo si se llamaba distinto; falso positivo si el nombre coincidía sin
+ * serlo). Ahora miramos el CONTENIDO: un encabezado de roles/permisos, o una matriz de permisos como
+ * tabla Markdown que mencione roles.
+ */
+export function looksLikeRolesDoc(body: string): boolean {
+  if (/^#{1,4}\s*(matriz de )?(roles|permisos)\b/im.test(body)) return true;
+  return /\brol(es)?\b/i.test(body) && /^\s*\|.*\|/m.test(body);
+}
+
+/**
+ * ¿El ADR de arquitectura tiene la sección de Autenticación CON CONTENIDO real? No basta con que
+ * exista el encabezado "## Autenticación" vacío: exigimos la línea canónica que el documenter siempre
+ * escribe cuando de verdad se ha definido el acceso (`**Proveedores:** ...`).
+ */
+export function hasAuthSectionContent(archBody: string): boolean {
+  return /##\s*Autenticaci[oó]n/i.test(archBody) && /\*\*Proveedores:\*\*/i.test(archBody);
+}
+
+/**
+ * ¿El ADR de arquitectura tiene sección de motor de base de datos CON CONTENIDO real? Igual que
+ * `hasAuthSectionContent`: no basta el encabezado, exige la línea canónica `**Motor:**` (sqlite o postgres).
+ */
+export function hasDbEngineSectionContent(archBody: string): boolean {
+  return /##\s*Base de datos/i.test(archBody) && /\*\*Motor:\*\*/i.test(archBody);
+}
+
+/**
+ * ¿El ADR de arquitectura ya registra la decisión de multiempresa? A diferencia de auth/motor de datos, esta
+ * línea puede vivir dentro de "## Decisiones técnicas" o en su propia sección "## Multiempresa" (ver
+ * `documenter-system.md`), así que basta con la línea canónica `**Multiempresa:**`, sin exigir un encabezado
+ * concreto.
+ */
+export function hasMultiTenantSectionContent(archBody: string): boolean {
+  return /\*\*Multiempresa:\*\*\s*(s[ií]|no)/i.test(archBody);
+}
+
 async function projectRoot(projectId: string): Promise<string | null> {
   const rows = await db()
     .select({ rootPath: schema.projects.rootPath })
@@ -196,12 +302,16 @@ export async function gatherInventory(projectId: string): Promise<ScopeInventory
   const arch = await getArchitecture(projectId).catch(() => null);
   const root = await projectRoot(projectId);
 
-  const entidades = root
+  const entidadesRaw = root
     ? (await listMd(root, "dominios")).map(slugOf).filter((s) => !s.startsWith("_"))
     : [];
+  // Dedup: dos ficheros de dominio que en realidad son la MISMA entidad (p.ej. cliente.md / clientes.md)
+  // no deben contarse por duplicado ni inflar la cobertura mostrada al usuario.
+  const entidades = dedupeEntidades(entidadesRaw);
   const reglas = root ? await listMd(root, "reglas") : [];
-  const decisiones = root ? await listMd(root, "decisiones") : [];
-  const hasRolesDoc = decisiones.some((n) => /rol|permis/i.test(n));
+  const decisionNames = root ? await listMd(root, "decisiones") : [];
+  const decisionBodies = root ? await readMdBodies(root, "decisiones", decisionNames) : [];
+  const hasRolesDoc = decisionBodies.some(looksLikeRolesDoc);
 
   let screenCount = 0;
   try {
@@ -213,8 +323,10 @@ export async function gatherInventory(projectId: string): Promise<ScopeInventory
   return {
     appType: arch?.appType ?? null,
     architectureConfirmed: !!arch && !arch.isDefault,
-    hasAuthSection: !!arch && /##\s*Autenticaci[oó]n/i.test(arch.body),
+    hasAuthSection: !!arch && hasAuthSectionContent(arch.body),
     hasRolesDoc,
+    hasDbEngineDecision: !!arch && hasDbEngineSectionContent(arch.body),
+    hasMultiTenantDecision: !!arch && hasMultiTenantSectionContent(arch.body),
     entidades,
     screenCount,
     reglasCount: reglas.length,

@@ -33,6 +33,17 @@ export const api = {
   availableModels: () => req<{ models: string[] }>("/api/config/models"),
   // Catálogo de proveedores con sus modelos preseleccionados (config curada).
   providers: () => req<{ providers: { id: string; label: string; tier: "cloud" | "local"; defaultMain: string; defaultFast: string; hasDefaults: boolean }[] }>("/api/config/providers"),
+  // Biblioteca CERRADA de MCPs que pueden "vitaminar" el chat (búsqueda web, y lo que se añada después).
+  mcpCatalog: () => req<{
+    entradas: {
+      id: string; nombre: string; descripcion: string; ventajas: string[]; inconvenientes: string[];
+      estado: "disponible" | "pendiente_de_validar" | "degradado" | "retirado";
+      envRequerido: { clave: string; etiqueta: string; ayuda?: string; relleno: boolean }[];
+      activo: boolean; activable: boolean;
+    }[];
+  }>("/api/mcp-catalog"),
+  setMcpServer: (id: string, activo: boolean, env?: Record<string, string>) =>
+    req<{ ok: true }>(`/api/mcp-catalog/${id}`, { method: "PUT", body: JSON.stringify({ activo, env }) }),
   projects: () => req<any[]>("/api/projects"),
   createProject: (name: string, description?: string) =>
     req<any>("/api/projects", { method: "POST", body: JSON.stringify({ name, description }) }),

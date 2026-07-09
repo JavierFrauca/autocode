@@ -11,8 +11,14 @@ import { childEnv } from "../util/proc-env.js";
  *
  * Diseño deliberado: vitest se resuelve desde el node_modules de AutoCode y se
  * apunta al workspace con --root, de modo que la app generada no necesita su
- * propio `npm install` para ser testeada en el bucle de desarrollo. En producción
- * las apps con Docker correrían sus tests dentro de su contenedor.
+ * propio `npm install` para ser testeada en el bucle de desarrollo.
+ *
+ * Sin aislamiento de proceso: AutoCode es monopuesto (el usuario genera código
+ * para sí mismo y lo ejecuta en su propio equipo), y build/paquete/"Probar la
+ * aplicación" ya corren siempre en host sí o sí (necesitan los binarios nativos
+ * de esa misma plataforma) — aislar solo el paso de tests no cerraba el hueco
+ * real y añadía una dependencia (Docker Desktop) que el usuario no técnico no
+ * tiene. Se valoró y se descartó conscientemente (ver historial de decisiones).
  */
 
 export interface TestCaseResult {
@@ -32,8 +38,6 @@ export interface VitestResult {
   /** Salida cruda (stdout+stderr) recortada, para diagnóstico cuando algo no parsea. */
   raw: string;
   error?: string;
-  /** Cómo se ejecutó: "docker" (aislado, sin red) o "host" (sin aislamiento real). */
-  sandbox: "docker" | "host";
 }
 
 export interface TypecheckResult {
@@ -99,8 +103,8 @@ function spawnNode(args: string[], cwd: string, timeoutMs: number): Promise<Spaw
 }
 
 /** Ejecuta un comando en el HOST vía shell (para resolver npm.cmd/npx.cmd en Windows). Para apps de
- *  escritorio del propio usuario, instalar/construir/empaquetar en local es aceptable (Docker es solo
- *  aislamiento opcional, y empaquetar requiere red + binarios nativos que no caben en el sandbox).
+ *  escritorio del propio usuario, instalar/construir/empaquetar en local es aceptable: AutoCode es
+ *  monopuesto, y empaquetar requiere red + binarios nativos que no cabrían en un sandbox aislado.
  *  `signal` permite abortar (cancelar) el proceso hijo en vuelo. */
 function spawnShell(cmd: string, args: string[], cwd: string, timeoutMs: number, signal?: AbortSignal): Promise<SpawnCapture> {
   return new Promise((resolve) => {
@@ -130,14 +134,6 @@ function spawnNpm(args: string[], cwd: string, timeoutMs: number, signal?: Abort
   return spawnShell("npm", args, cwd, timeoutMs, signal);
 }
 
-let _dockerOk: boolean | null = null;
-async function dockerAvailable(): Promise<boolean> {
-  if (_dockerOk !== null) return _dockerOk;
-  const cap = await spawnAny("docker", ["version", "--format", "{{.Server.Version}}"], process.cwd(), process.env, 8_000);
-  _dockerOk = !cap.timedOut && cap.code === 0;
-  return _dockerOk;
-}
-
 /** ¿La app declara dependencias de ejecución (que requieren instalación)? */
 function appHasDependencies(ws: string): boolean {
   try {
@@ -148,94 +144,48 @@ function appHasDependencies(ws: string): boolean {
   }
 }
 
-export type SandboxMode = "auto" | "host" | "docker";
-export interface RunVitestOptions { timeoutMs?: number; sandbox?: SandboxMode }
+export interface RunVitestOptions { timeoutMs?: number }
 
 /**
- * Ejecuta los tests del workspace y parsea el reporter JSON de vitest. El código generado
- * es NO confiable, así que la ejecución se aísla según lo disponible:
- *  - Docker => contenedor SIN red; instala deps dentro y corre el vitest de la app. (aislado)
- *  - Sin Docker + app sin dependencias => vitest de AutoCode via --root. (host, riesgo bajo)
- *  - Sin Docker + app con dependencias => NO se ejecuta: instalar deps no confiables en el
- *    host sería inseguro → se pide Docker explícitamente.
+ * Ejecuta los tests del workspace en el HOST y parsea el reporter JSON de vitest. El veredicto
+ * pass/fail del agente QA se ancla en esta salida real, no en la opinión del LLM. Apps con
+ * dependencias: se ejecutan con sus node_modules ya instalados (ensureAppDeps los deja en el
+ * host). Si aún no están instalados, los tests quedan INCONCLUSOS (no bloquean el verde).
  */
 export async function runVitest(workspaceDir: string, opts: RunVitestOptions = {}): Promise<VitestResult> {
   const timeoutMs = opts.timeoutMs ?? 180_000;
-  const mode = opts.sandbox ?? "auto";
 
-  // Solo Docker EXPLÍCITO usa el contenedor. En "auto" los tests corren en el HOST (donde vive y se
-  // ejecuta la app, monopuesto): así no se reinstalan node_modules linux que romperían el build/preview
-  // del host — el Docker "auto" clobbeaba los binarios nativos de los node_modules compartidos.
-  if (mode === "docker") return runVitestInDocker(workspaceDir, timeoutMs);
-
-  // Apps con dependencias: se ejecutan en host con sus node_modules ya instalados (ensureAppDeps los
-  // deja en el host). Si aún no están instalados, los tests quedan INCONCLUSOS (no bloquean el verde).
   if (appHasDependencies(workspaceDir) && !existsSync(path.join(workspaceDir, "node_modules"))) {
-    return emptyResult("", "host", "node_modules no instalado: tests no ejecutados (inconcluso)");
+    return emptyResult("", "node_modules no instalado: tests no ejecutados (inconcluso)");
   }
   return runVitestOnHost(workspaceDir, timeoutMs);
 }
 
-/** Host: vitest de AutoCode apuntando al workspace con --root (solo apps sin dependencias). */
+/** Vitest de la propia app si lo trae, si no el de AutoCode vía --root. */
 async function runVitestOnHost(workspaceDir: string, timeoutMs: number): Promise<VitestResult> {
   const outFile = path.join(workspaceDir, ".qa-vitest-result.json");
   await fs.rm(outFile, { force: true }).catch(() => {});
   // Usa el vitest de la PROPIA app si lo trae (resuelve su config/plugins y sus deps nativas del host);
-  // si no, el de AutoCode con --root (apps sin dependencias).
+  // si no, el de AutoCode con --root (server-app/api-server no lo declaran a propósito — ver su
+  // package.json — así no necesitan instalarlo aparte).
   const appVitest = path.join(workspaceDir, "node_modules", "vitest", "vitest.mjs");
   const useAppVitest = existsSync(appVitest);
   const cli = useAppVitest ? appVitest : vitestCli();
   const cwd = useAppVitest ? workspaceDir : autocodeRoot();
   const args = [cli, "run", "--root", workspaceDir, "--reporter=json", "--outputFile", outFile, "--passWithNoTests=false"];
   const cap = await spawnNode(args, cwd, timeoutMs);
-  return parseVitestRun(outFile, cap, timeoutMs, "host");
+  return parseVitestRun(outFile, cap, timeoutMs);
 }
 
-/**
- * Docker: dos fases sobre el mismo workspace montado. Fase 1 instala deps (con red); fase 2
- * corre los tests SIN red, de modo que el código generado no puede salir fuera durante la
- * ejecución. Requiere que la app traiga vitest como devDependency (el coder lo genera así).
- * (Camino de producción; no verificado en este entorno por carecer de Docker.)
- */
-async function runVitestInDocker(workspaceDir: string, timeoutMs: number): Promise<VitestResult> {
-  const outFile = path.join(workspaceDir, ".qa-vitest-result.json");
-  await fs.rm(outFile, { force: true }).catch(() => {});
-  const mount = ["-v", `${workspaceDir}:/work`, "-w", "/work", "node:20-bookworm"];
-
-  // Fase 1: instalar dependencias (con red).
-  const install = await spawnAny(
-    "docker",
-    ["run", "--rm", "--pids-limit=512", ...mount, "npm", "install", "--no-audit", "--no-fund", "--no-progress"],
-    process.cwd(), process.env, timeoutMs,
-  );
-  if (install.timedOut || install.code !== 0) {
-    return emptyResult((install.stdout + install.stderr).slice(-4000), "docker", "falló la instalación de dependencias en el contenedor");
-  }
-
-  // Fase 2: ejecutar los tests SIN red.
-  const cap = await spawnAny(
-    "docker",
-    ["run", "--rm", "--network=none", "--pids-limit=512", ...mount,
-     "npx", "--no-install", "vitest", "run", "--reporter=json", "--outputFile", ".qa-vitest-result.json", "--passWithNoTests=false"],
-    process.cwd(), process.env, timeoutMs,
-  );
-  return parseVitestRun(outFile, cap, timeoutMs, "docker");
-}
-
-async function parseVitestRun(
-  outFile: string,
-  cap: SpawnCapture,
-  timeoutMs: number,
-  sandbox: "host" | "docker",
-): Promise<VitestResult> {
+async function parseVitestRun(outFile: string, cap: SpawnCapture, timeoutMs: number): Promise<VitestResult> {
   const raw = (cap.stdout + "\n" + cap.stderr).slice(-8000);
-  if (cap.timedOut) return emptyResult(raw, sandbox, `Timeout tras ${timeoutMs}ms ejecutando los tests`);
+  if (cap.timedOut) return emptyResult(raw, `Timeout tras ${timeoutMs}ms ejecutando los tests`);
 
   let report: any;
   try {
     report = JSON.parse(await fs.readFile(outFile, "utf-8"));
   } catch {
-    return emptyResult(raw, sandbox, "vitest no generó resultados (¿error de compilación o sin tests?)");
+    return emptyResult(raw, "vitest no generó resultados (¿error de compilación o sin tests?)");
   } finally {
     await fs.rm(outFile, { force: true }).catch(() => {});
   }
@@ -261,16 +211,16 @@ async function parseVitestRun(
   return {
     ran: true,
     success: failed === 0 && total > 0 && (report.success ?? true),
-    total, passed, failed, skipped, tests, raw, sandbox,
+    total, passed, failed, skipped, tests, raw,
   };
 }
 
-function emptyResult(raw: string, sandbox: "host" | "docker", error: string): VitestResult {
-  return { ran: false, success: false, total: 0, passed: 0, failed: 0, skipped: 0, tests: [], raw, error, sandbox };
+function emptyResult(raw: string, error: string): VitestResult {
+  return { ran: false, success: false, total: 0, passed: 0, failed: 0, skipped: 0, tests: [], raw, error };
 }
 
 export interface CompileResult {
-  /** true si llegó a ejecutarse tsc (false = omitido por falta de tsconfig/docker). */
+  /** true si llegó a ejecutarse tsc (false = omitido por falta de tsconfig o de typescript). */
   ran: boolean;
   ok: boolean;
   /** Salida de tsc (errores), recortada. */
@@ -320,23 +270,12 @@ export async function ensureAppDeps(
 }
 
 /**
- * Compila (typecheck) la app y devuelve los errores. En Docker SIN red si hay deps (las usa de
- * node_modules, ya instaladas por ensureAppDeps); en host con el tsc de AutoCode si no hay deps.
- * Es el gate de compilación que alimenta el bucle de reparación antes de QA.
+ * Compila (typecheck) la app con el tsc de AutoCode y devuelve los errores. Es el gate de
+ * compilación que alimenta el bucle de reparación antes de QA.
  */
 export async function typecheckApp(ws: string, timeoutMs = 120_000): Promise<CompileResult> {
   const tsconfig = path.join(ws, "tsconfig.json");
   try { await fs.access(tsconfig); } catch { return { ran: false, ok: true, errors: "(sin tsconfig.json)" }; }
-
-  if (appHasDependencies(ws) && (await dockerAvailable())) {
-    const cap = await spawnAny(
-      "docker",
-      ["run", "--rm", "--network=none", "--pids-limit=512", "-v", `${ws}:/work`, "-w", "/work", "node:20-bookworm",
-       "npx", "--no-install", "tsc", "--noEmit", "-p", "tsconfig.json"],
-      process.cwd(), process.env, timeoutMs,
-    );
-    return { ran: true, ok: !cap.timedOut && cap.code === 0, errors: (cap.stdout + cap.stderr).slice(-8000) };
-  }
 
   const tscCli = path.join(autocodeRoot(), "node_modules", "typescript", "bin", "tsc");
   if (!existsSync(tscCli)) return { ran: false, ok: true, errors: "(typescript no disponible)" };
@@ -349,15 +288,15 @@ export interface BuildSmokeResult {
   ran: boolean;
   ok: boolean;
   output: string;
-  /** Motivo si se omitió (sin script de build, sin Docker, tipo no soportado…). */
+  /** Motivo si se omitió (sin script de build, sin node_modules, tipo no soportado…). */
   skipped?: string;
 }
 
 /**
  * Verificación de ARRANQUE/BUILD: ejecuta el `npm run build` REAL de la app (emite, no solo
- * typecheck) en Docker SIN red, con las deps ya instaladas. Es un gate más fuerte que `--noEmit`:
- * cazaría fallos de emisión/empaquetado que el typecheck no ve. Best-effort: si no hay Docker, script
- * de build o `node_modules`, se omite (no es un fallo). Para `electron` el build necesita el binario
+ * typecheck) en el HOST, con las deps ya instaladas. Es un gate más fuerte que `--noEmit`:
+ * cazaría fallos de emisión/empaquetado que el typecheck no ve. Best-effort: si falta script de
+ * build o `node_modules`, se omite (no es un fallo). Para `electron` el build necesita el binario
  * de Electron (descarga de red): se omite aquí y queda para la verificación visual con runtime real.
  */
 export async function runBuild(ws: string, appType: AppType, timeoutMs = 300_000): Promise<BuildSmokeResult> {
